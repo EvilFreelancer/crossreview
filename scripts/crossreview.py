@@ -953,6 +953,25 @@ def render_shell(command: str, brief: str, out: str) -> List[str]:
     return [shutil.which("sh") or "/bin/sh", "-c", rendered]
 
 
+RUN_NAME = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{4}$")
+KEEP_RUNS_DAYS = 7
+
+
+def prune_old_runs(root: Path, days: int = KEEP_RUNS_DAYS) -> None:
+    """Remove finished runs of the default root older than `days`; only our own
+    directories (the run-name pattern, a status that says done) are touched."""
+    cutoff = time.time() - days * 86400
+    for path in root.iterdir() if root.is_dir() else []:
+        try:
+            if not (path.is_dir() and RUN_NAME.match(path.name) and path.stat().st_mtime < cutoff):
+                continue
+            status = json.loads((path / "status.json").read_text(encoding="utf-8"))
+            if status.get("done") and float(status.get("updated") or 0) < cutoff:
+                shutil.rmtree(str(path), ignore_errors=True)
+        except (OSError, ValueError):
+            continue
+
+
 def new_run_dir(base: Optional[str]) -> Path:
     if base:
         path = Path(base).expanduser()
@@ -961,6 +980,7 @@ def new_run_dir(base: Optional[str]) -> Path:
     user = re.sub(r"\W", "", os.environ.get("USER") or os.environ.get("USERNAME") or "user") or "user"
     root = Path(tempfile.gettempdir()) / ("crossreview-%s" % user)
     root.mkdir(parents=True, exist_ok=True)
+    prune_old_runs(root)
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     path = root / ("%s-%s" % (stamp, secrets.token_hex(2)))
     path.mkdir()

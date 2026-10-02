@@ -98,6 +98,9 @@ class TempCase(unittest.TestCase):
         self.env_backup = dict(os.environ)
         self.addCleanup(self._restore_env)
         os.environ["CROSSREVIEW_HOME"] = str(self.tmp / "home")
+        # Runs without --run-dir land under the temp dir: keep them in ours.
+        for var in ("TMPDIR", "TEMP", "TMP"):
+            os.environ[var] = str(self.tmp)
         os.environ["CODDY_HOME"] = str(self.tmp / "coddy")
         os.environ.pop("CROSSREVIEW_ROSTER", None)
         os.environ.pop("CROSSREVIEW_DEPTH", None)
@@ -623,6 +626,19 @@ class RunTest(TempCase):
         self.assertEqual(rc, 0, out + err)
         self.assertIn("< brief.md > reviews/good.md" if not IS_WINDOWS else "brief.md", out)
         self.assertIn("quorum", out.lower())
+
+    def test_old_finished_runs_are_pruned_and_nothing_else(self):
+        root = self.tmp / "root"
+        root.mkdir()
+        old_done, old_running, foreign = root / "20250101-000000-aaaa", root / "20250101-000000-bbbb", root / "keep-me"
+        for path, done in ((old_done, True), (old_running, False), (foreign, True)):
+            path.mkdir()
+            (path / "status.json").write_text(json.dumps({"done": done, "updated": 1000}), encoding="utf-8")
+            os.utime(str(path), (1000, 1000))
+        cr.prune_old_runs(root)
+        self.assertFalse(old_done.exists())
+        self.assertTrue(old_running.exists())
+        self.assertTrue(foreign.exists())
 
     def test_one_off_reviewers_and_unknown_names(self):
         roster = self.roster([{"name": "good", "command": self.command("ok")}])
