@@ -18,10 +18,11 @@ metadata:
 
 # Crossreview: independent reviewers, one orchestrator
 
-You are the **orchestrator**. You write one brief, every reviewer gets that brief and nothing
-else, they all answer, and then you alone decide: which findings are real, which matter, what to
-fix now and what not to fix. The reviewers advise; the last word is yours. Their value is in the
-disagreement of different models, so pick reviewers from different vendors.
+One brief is written, every reviewer gets that brief and nothing else, they all answer, and then
+the **orchestrator** alone decides: which findings are real, which matter, what to fix now and what
+not to fix. The reviewers advise; the last word is the orchestrator's: the subagent you hand the
+run to in step 3, or you. Their value is in the disagreement of different models, so pick
+reviewers from different vendors.
 
 Three rules hold for the whole run:
 
@@ -62,22 +63,10 @@ commands out, or every reviewer fails.
 **Never recurse.** If `CROSSREVIEW_DEPTH` is set in your environment, you are a reviewer: answer
 the brief directly and do not start another crossreview.
 
-## Inside Coddy
-
-Coddy ships a built-in coordinator subagent named `crossreview`. It is hidden, so it is not among
-the agents you see listed, but `spawn_agent` accepts it. If you are Coddy, that coordinator is the
-orchestrator: do steps 1 and 2 here, then call `spawn_agent` with `agent: "crossreview"` in the
-foreground and a prompt naming the brief file, the roster file and `<skill>`. The roster is the
-path `crossreview.py roster --host coddy` printed, or for one-off reviewers a file you write with
-`crossreview.py init --host coddy --path <tmp>/roster.json agent:model ...`. The coordinator runs
-the CLI reviewers as background tasks and its own internal reviewers on any model Coddy is signed
-into, collects every answer, verifies and decides. Its report is the final word: relay it to the
-user as it is. Only if `spawn_agent` refuses the name, do steps 3 to 5 yourself.
-
 ## 1. Reviewers
 
 Reviewers named in the request ("crossreview with cursor auto and coddy on codex/gpt-5.6-sol")
-are a one-off list: pass each as `--reviewer agent:model` in step 3 and leave the roster alone.
+are a one-off list: pass each as `--reviewer agent:model` to the run and leave the roster alone.
 
 Otherwise run `crossreview.py roster --host <you>`: it takes your local roster of this project when
 there is one, else your global one, and you act on its exit code:
@@ -134,7 +123,30 @@ crossreview.py brief --out <tmp>/brief.md --intent "<what the change is meant to
   already took in an earlier round. Write them yourself; never paste or paraphrase a reviewer's
   answer and never say who raised what.
 
-## 3. Run and collect every answer
+## 3. Hand the run to the orchestrator
+
+Steps 1 and 2 were yours: the setup questions and the intent of the brief need the conversation.
+Steps 4 to 6 are the orchestrator's, and whenever your host can start a subagent they run in one,
+so the reviews, the checking of the code and the decisions stay out of your context. Do not run
+`crossreview.py run` yourself in that case:
+
+- **Coddy**: its built-in subagent `crossreview` is the orchestrator. It is hidden, so it is not
+  among the agents you see listed, but `spawn_agent` accepts it: call it with
+  `agent: "crossreview"` in the foreground and a prompt naming the brief file, the roster file and
+  `<skill>`.
+- **Claude Code**: the Task tool (called Agent in some versions) with the `general-purpose` agent.
+  **OpenCode**: the task tool. Any other host whose subagents have a shell: the same. Start it in
+  the foreground with a prompt that says it is the crossreview orchestrator, that it reads
+  `<skill>/SKILL.md` and carries out steps 4 to 6, and that names the brief file, `--host <you>`,
+  and the roster file or the one-off `--reviewer` specs.
+
+The roster file is the path `crossreview.py roster --host <you>` printed; for one-off reviewers in
+Coddy, write one with `crossreview.py init --host coddy --path <tmp>/roster.json agent:model ...`.
+The subagent's report is the final word: relay it to the user as it is, and you are done. Carry
+out steps 4 to 6 yourself only when your host has no subagents, when the roster holds internal
+reviewers of yours that your subagents could not start, or when you are that subagent.
+
+## 4. Run and collect every answer
 
 ```
 crossreview.py run --host <you> --brief <tmp>/brief.md [--reviewer agent:model ...] [--scope global]
@@ -157,7 +169,7 @@ When the run has finished, look at every reviewer that did not answer:
 per entry on its model while the CLIs run, with the brief file as its whole prompt, and write each
 answer to the path the status names.
 
-## 4. Decide
+## 5. Decide
 
 `crossreview.py collect <run>` prints every answer, and the error of every reviewer that failed.
 
@@ -172,7 +184,7 @@ answer to the path the status names.
    - **open**: you could not settle it; say what would.
 4. **Set the severity yourself** after verification, not by the loudest reviewer or the count.
 
-## 5. Report
+## 6. Report
 
 1. `## Verdict`: approve, approve with changes or needs rework, and one sentence why. Yours.
 2. `## Reviewers`: who answered (agent, model, time), who did not and why, retries included.
@@ -202,4 +214,4 @@ substitute the quoted paths of the brief and of its output file for `{brief}` an
 `CROSSREVIEW_DEPTH=1 ` in front of the command (`$env:CROSSREVIEW_DEPTH = '1'; ` in PowerShell) so
 the reviewer knows not to start a crossreview of its own, and start it with your own background
 shell tool in an empty directory, each under a time limit; wait for all of them, then continue at
-step 4.
+step 5.

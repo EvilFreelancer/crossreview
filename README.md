@@ -25,6 +25,12 @@ any agent that reads `SKILL.md`, on Linux, macOS or Windows.
           verifies each finding in the code, decides: fix / not worth fixing / rejected / open
 ```
 
+You invoke the skill, and the agent you talk to asks what it must (which reviewers, what the change is
+for), writes the brief and hands the rest to a subagent: Coddy's built-in `crossreview` coordinator, a
+`general-purpose` agent in Claude Code, a task in OpenCode. The subagent runs the reviewers, collects
+every answer, checks the findings and decides, and its report comes back as the answer, so none of
+that work fills your conversation. An agent without subagents does the same steps itself.
+
 Three rules hold for every run:
 
 - **Reviewers are blind to each other.** Each one gets the brief and nothing else, in every round,
