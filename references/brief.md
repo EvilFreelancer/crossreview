@@ -13,7 +13,8 @@ the same change without seeing each other's answers, and an orchestrator checks 
 the code and decides what to act on. Look for real
 defects: wrong behaviour, crashes, data loss, races, security holes, broken contracts, missing or
 wrong tests, and documentation the change leaves stale. Skip style preferences unless they hide a
-bug. In a diff, lines starting with `-` are the old code: judge the new version.
+bug. In a diff, lines starting with `-` are the old code: judge the new version. Review it yourself:
+do not start a cross-review of your own or hand the brief to other agents.
 
 ## What the change is meant to do
 

@@ -357,7 +357,7 @@ def list_models(agent: str, binary: Optional[str] = None) -> Tuple[List[str], st
         return [ln.strip() for ln in text.splitlines() if ln.strip()], "raw output of %s %s" % (cand, spec.models)
     try:
         return parser(text), "from `%s %s`" % (cand, spec.models)
-    except ValueError as exc:
+    except (ValueError, TypeError, AttributeError) as exc:
         return [], "failed: could not parse `%s %s`: %s" % (cand, spec.models, exc)
 
 
@@ -414,11 +414,25 @@ def sha256_file(path: Path) -> str:
 
 
 class RosterLocation:
+    """A roster file read once: the digest, the approval check and the parsed
+    roster all come from the same bytes, so a file swapped between them cannot
+    run under an approval given to what it held before."""
+
     def __init__(self, path: Path, origin: str, workspace: Optional[Path] = None):
         self.path = path
         self.origin = origin
         self.workspace = workspace
-        self.digest = sha256_file(path)
+        self.data = Path(path).read_bytes()
+        self.digest = hashlib.sha256(self.data).hexdigest()
+
+    def roster(self) -> dict:
+        try:
+            data = json.loads(self.data.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise CrossreviewError("cannot read %s: %s" % (self.path, exc))
+        if not isinstance(data, dict) or not isinstance(data.get("reviewers"), list):
+            raise CrossreviewError("%s is not a roster: it needs a \"reviewers\" list" % self.path)
+        return data
 
     @property
     def needs_approval(self) -> bool:
@@ -610,7 +624,7 @@ def cmd_roster(args) -> int:
         print("no roster (looked at $CROSSREVIEW_ROSTER, %s, %s and %s in the workspace)" % (
             user_roster_path(), legacy_coddy_roster(), " and ".join(WORKSPACE_ROSTERS)))
         return EXIT_NO_ROSTER
-    roster = load_roster(loc.path)
+    roster = loc.roster()
     table = load_table()
     if args.json:
         print(json.dumps({"path": str(loc.path), "origin": loc.origin, "sha256": loc.digest,
@@ -623,7 +637,8 @@ def cmd_roster(args) -> int:
     if loc.needs_approval:
         print("\nThis roster came with the workspace and runs the commands above. It is used only after "
               "the user approves this exact file (sha256 %s): show them the commands, and on a yes run "
-              "`crossreview.py trust --workspace %s --roster %s`." % (loc.digest, loc.workspace, loc.path))
+              "`crossreview.py trust --workspace %s --roster %s --sha256 %s`." % (
+                  loc.digest, loc.workspace, loc.path, loc.digest))
         return EXIT_NEEDS_APPROVAL
     return EXIT_OK
 
@@ -646,6 +661,9 @@ def cmd_trust(args) -> int:
         else:
             raise CrossreviewError("no workspace roster under %s" % ws)
     digest = sha256_file(path)
+    if args.sha256 and args.sha256.lower() != digest:
+        raise CrossreviewError("%s changed since it was shown (sha256 %s, now %s): show it to the user again"
+                               % (path, args.sha256, digest))
     data = _read_json(trust_path(), {"version": 1, "approvals": []})
     approvals = [a for a in data.get("approvals", [])
                  if not (a.get("workspace") == str(ws) and a.get("roster") == str(path))]
@@ -896,7 +914,8 @@ def build_brief(args) -> Tuple[str, dict]:
            "the code and decides what to act on. Look for real "
            "defects: wrong behaviour, crashes, data loss, races, security holes, broken contracts, missing or "
            "wrong tests, and documentation the change leaves stale. Skip style preferences unless they hide a "
-           "bug. In a diff, lines starting with `-` are the old code: judge the new version.", "",
+           "bug. In a diff, lines starting with `-` are the old code: judge the new version. Review it yourself: "
+           "do not start a cross-review of your own or hand the brief to other agents.", "",
            "## What the change is meant to do", "", intent or "Not stated: infer it from the change.", "",
            "## Scope", "", scope[:1].upper() + scope[1:] + ".", "",
            "## Answer format", "",
@@ -922,6 +941,8 @@ def build_brief(args) -> Tuple[str, dict]:
 
 
 def cmd_brief(args) -> int:
+    if args.exclude and (args.files or args.doc):
+        raise CrossreviewError("--exclude filters a git scope; with --files or --doc name only what you want")
     text, stats = build_brief(args)
     out = Path(args.out).expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -1093,14 +1114,17 @@ def select_entries(args) -> Tuple[List[dict], int, int, str]:
         raise CrossreviewError("no roster: run setup (detect, then init) or name reviewers with --reviewer")
     if loc.needs_approval:
         raise CrossreviewError("the workspace roster %s is not approved; see `crossreview.py roster`" % loc.path)
-    roster = load_roster(loc.path)
+    roster = loc.roster()
     entries = normalize_entries(roster, loc.origin)
     return (entries, int(roster.get("min_reviewers", DEFAULT_MIN_REVIEWERS)),
             int(roster.get("timeout", DEFAULT_TIMEOUT)), "%s (%s)" % (loc.path, loc.origin))
 
 
 def prepare_run(entries: List[dict], brief_src: Path, run_dir: Path, cwd: Optional[str], timeout: int,
-                min_reviewers: int, source: str, host: Optional[str], only: Optional[List[str]]) -> dict:
+                min_reviewers: int, source: str, host: Optional[str], only: Optional[List[str]],
+                parallel: int = 0) -> dict:
+    if (run_dir / "run.json").exists() or (run_dir / "status.json").exists():
+        raise CrossreviewError("%s already holds a run: pick a new directory, or `retry` that run" % run_dir)
     (run_dir / "reviews").mkdir(parents=True, exist_ok=True)
     work = Path(cwd).expanduser().resolve() if cwd else run_dir / "work"
     work.mkdir(parents=True, exist_ok=True)
@@ -1123,8 +1147,12 @@ def prepare_run(entries: List[dict], brief_src: Path, run_dir: Path, cwd: Option
                 "log": str(out.with_suffix(".log")), "timeout": int(e.get("timeout") or timeout)}
         if e["kind"] == "internal":
             item["status"] = "host" if host and e.get("host") == host else "skipped"
-            item["note"] = ("run it as a subagent of %s on %s and save its answer to %s" % (
-                e.get("host"), e.get("model"), out)) if item["status"] == "host" else (
+            for key in ("definition", "reasoning"):
+                if e.get(key):
+                    item[key] = e[key]
+            extra = "".join(", %s %s" % (k, e[k]) for k in ("definition", "reasoning") if e.get(k))
+            item["note"] = ("run it as a read-only subagent of %s on %s%s and save its answer to %s" % (
+                e.get("host"), e.get("model"), extra, out)) if item["status"] == "host" else (
                 "internal reviewer of %s; this host cannot start it" % e.get("host"))
             reviewers.append(item)
             continue
@@ -1137,6 +1165,14 @@ def prepare_run(entries: List[dict], brief_src: Path, run_dir: Path, cwd: Option
             argv = [a.replace("{brief}", str(brief)).replace("{out}", str(out)) for a in plan["argv"]]
             if any(a in ARG_BRIEF for a in plan["argv"]):
                 text = brief.read_text(encoding="utf-8")
+                shim = shutil.which(plan["argv"][0]) or plan["argv"][0]
+                if IS_WINDOWS and shim.lower().endswith((".cmd", ".bat")):
+                    item.update({"status": "failed", "mode": "exec", "argv": [], "rc": None, "bytes": 0,
+                                 "note": "%s is a batch file: cmd.exe would interpret the text of the brief "
+                                         "passed as its argument, so it is not run" % Path(shim).name})
+                    item["display"] = command
+                    reviewers.append(item)
+                    continue
                 if len(text.encode("utf-8")) > ARG_LIMIT:
                     item.update({"status": "failed", "mode": "exec", "argv": [], "rc": None, "bytes": 0,
                                  "note": "this CLI takes the brief as a command-line argument, which holds at most "
@@ -1169,7 +1205,7 @@ def prepare_run(entries: List[dict], brief_src: Path, run_dir: Path, cwd: Option
         raise CrossreviewError("no reviewer to run (check the names, `enabled` and the roster)")
     plan = {"version": 1, "run_dir": str(run_dir), "brief": str(brief), "cwd": str(work),
             "created": _dt.datetime.now().isoformat(timespec="seconds"), "source": source,
-            "min_reviewers": min_reviewers, "reviewers": reviewers}
+            "min_reviewers": min_reviewers, "parallel": parallel, "reviewers": reviewers}
     _write_json(run_dir / "run.json", plan)
     return plan
 
@@ -1374,7 +1410,7 @@ def cmd_run(args) -> int:
     entries, min_reviewers, timeout, source = select_entries(args)
     run_dir = new_run_dir(args.run_dir)
     plan = prepare_run(entries, brief, run_dir, args.cwd, args.timeout or timeout,
-                       args.min_reviewers or min_reviewers, source, args.host, args.only)
+                       args.min_reviewers or min_reviewers, source, args.host, args.only, args.parallel)
     print("run: %s" % run_dir)
     print("reviewers from %s; working directory %s; paths below are relative to the run" % (source, plan["cwd"]))
     for r in plan["reviewers"]:
@@ -1595,7 +1631,7 @@ def cmd_retry(args) -> int:
         if r["name"] in args.names:
             r["status"] = "queued"
     _write_json(run_dir / "status.json", status)
-    pid = spawn_supervisor(run_dir, 0)
+    pid = spawn_supervisor(run_dir, int(plan.get("parallel") or 0))
     deadline = time.time() + 10
     while time.time() < deadline and _read_json(run_dir / "status.json", {}).get("supervisor_pid") != pid:
         time.sleep(0.1)
@@ -1676,6 +1712,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("trust", help="approve the workspace roster (only after the user agreed)")
     s.add_argument("--workspace")
     s.add_argument("--roster", help="the roster file inside the workspace (default: .agents/crossreview.json)")
+    s.add_argument("--sha256", help="the digest `roster` printed: refuse when the file no longer has it")
     s.set_defaults(func=cmd_trust)
 
     s = sub.add_parser("brief", help="write a review brief")

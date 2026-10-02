@@ -210,6 +210,18 @@ class ModelsParsingTest(unittest.TestCase):
         self.assertEqual(cr.parse_coddy_models(text), ["neuraldeep/qwen3.8-27b", "codex/gpt-5.6-sol"])
 
 
+class ModelsCommandTest(TempCase):
+    def test_a_malformed_codex_catalog_is_a_failed_listing(self):
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        write_stub(bin_dir, "codex", version="codex-cli 1", models="debug models", models_out="null")
+        env = dict(os.environ, PATH=os.pathsep.join([str(bin_dir), tools_path(self.tmp)]))
+        rc, out, err = self.helper("models", "codex", env=env)
+        self.assertEqual(rc, cr.EXIT_ERROR, out + err)
+        self.assertIn("failed", err)
+        self.assertNotIn("Traceback", err)
+
+
 class DetectTest(TempCase):
     def stub_path(self):
         bin_dir = self.tmp / "bin"
@@ -411,6 +423,21 @@ class RosterTest(TempCase):
         rc, out, _ = self.helper("roster", "--roster", outside, cwd=repo)
         self.assertEqual(rc, 0, out)
 
+    def test_trust_refuses_a_file_changed_since_it_was_shown(self):
+        repo = self.make_repo()
+        (repo / ".agents").mkdir()
+        roster = repo / ".agents" / "crossreview.json"
+        roster.write_text(json.dumps({"reviewers": [{"kind": "cli", "command": "shown < {brief} > {out}"}]}))
+        rc, out, _ = self.helper("roster", cwd=repo)
+        self.assertEqual(rc, cr.EXIT_NEEDS_APPROVAL, out)
+        shown = out.split("--sha256 ")[1].split("`")[0].strip()
+        roster.write_text(json.dumps({"reviewers": [{"kind": "cli", "command": "swapped < {brief} > {out}"}]}))
+        rc, _, err = self.helper("trust", "--sha256", shown, cwd=repo)
+        self.assertEqual(rc, cr.EXIT_ERROR)
+        self.assertIn("changed since it was shown", err)
+        rc, out, _ = self.helper("roster", cwd=repo)
+        self.assertEqual(rc, cr.EXIT_NEEDS_APPROVAL, out)
+
     def test_import_add_keeps_what_was_there(self):
         home = self.tmp / "home"
         home.mkdir()
@@ -519,6 +546,16 @@ class BriefTest(TempCase):
         self.assertIn("read only by the tests on purpose", text)
         self.assertIn("without seeing each other's answers", text)
         self.assertNotIn("# Changed", text)
+
+    def test_exclude_belongs_to_a_git_scope(self):
+        repo = self.make_repo()
+        rc, _, err = self.helper("brief", "--out", self.tmp / "b.md", "--files", "app.py", "--exclude", "x",
+                                 cwd=repo)
+        self.assertEqual(rc, cr.EXIT_ERROR)
+        self.assertIn("--exclude filters a git scope", err)
+        rc, _, err = self.helper("brief", "--out", self.tmp / "b.md", "--doc", self.tmp / "missing.md", cwd=repo)
+        self.assertEqual(rc, cr.EXIT_ERROR)
+        self.assertIn("does not exist", err)
 
     def test_empty_scope_is_an_error(self):
         repo = self.make_repo()
@@ -760,6 +797,39 @@ class RunTest(TempCase):
         self.assertFalse(old_done.exists())
         self.assertTrue(old_running.exists())
         self.assertTrue(foreign.exists())
+
+    def test_a_run_directory_holds_one_run(self):
+        roster = self.roster([{"name": "good", "command": self.command("ok")}])
+        rc, out, status, run_dir = self.run_and_wait(roster)
+        self.assertEqual(rc, 0, out)
+        rc, _, err = self.helper("run", "--brief", self.brief, "--roster", roster, "--run-dir", run_dir)
+        self.assertEqual(rc, cr.EXIT_ERROR)
+        self.assertIn("already holds a run", err)
+
+    def test_internal_reviewers_keep_their_definition_and_reasoning(self):
+        roster = self.roster([{"kind": "internal", "host": "coddy", "definition": "explore",
+                               "model": "devin/swe-2", "reasoning": "high"}], min_reviewers=1)
+        rc, out, status, _ = self.run_and_wait(roster, "--host", "coddy")
+        r = status["reviewers"][0]
+        self.assertEqual((r["status"], r["definition"], r["reasoning"]), ("host", "explore", "high"))
+        self.assertIn("explore", r["note"])
+
+    @unittest.skipUnless(IS_WINDOWS, "batch-file shims are the Windows half")
+    def test_a_batch_file_reviewer_on_windows(self):
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        echo = bin_dir / "echo_stdin.py"
+        echo.write_text("import sys\nsys.stdout.buffer.write(sys.stdin.buffer.read())\n", encoding="utf-8")
+        (bin_dir / "fakecli.cmd").write_text('@"%s" "%s" %%*\r\n' % (sys.executable, echo), encoding="ascii")
+        os.environ["PATH"] = os.pathsep.join([str(bin_dir), os.environ["PATH"]])
+        roster = self.roster([{"name": "shim", "command": "cmd /d /c --% fakecli -p < {brief} > {out}"},
+                              {"name": "shim-arg", "command": 'fakecli "$(Get-Content -Raw -Encoding UTF8 {brief})" > {out}'}])
+        rc, out, status, run_dir = self.run_and_wait(roster)
+        by_name = {r["name"]: r for r in status["reviewers"]}
+        self.assertEqual(by_name["shim"]["status"], "done", out)
+        self.assertEqual((run_dir / "reviews" / "shim.md").read_bytes(), self.brief.read_bytes())
+        self.assertEqual(by_name["shim-arg"]["status"], "failed")
+        self.assertIn("batch file", by_name["shim-arg"]["note"])
 
     def test_one_off_reviewers_and_unknown_names(self):
         roster = self.roster([{"name": "good", "command": self.command("ok")}])
