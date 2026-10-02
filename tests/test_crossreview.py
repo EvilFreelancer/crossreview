@@ -48,6 +48,14 @@ STUB_REVIEWER = textwrap.dedent('''
     elif mode == "slow":
         time.sleep(60)
         sys.stdout.write("too late\\n")
+    elif mode == "short-401":
+        sys.stdout.write("1. medium: app/auth.py:12 returns 401 for an expired token instead of 403.\\n")
+    elif mode == "stubborn":
+        import subprocess, signal
+        child = subprocess.Popen([sys.executable, "-c",
+            "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(120)"])
+        open(sys.argv[2], "w").write(str(child.pid))
+        time.sleep(120)
 ''')
 
 
@@ -101,6 +109,8 @@ class TempCase(unittest.TestCase):
         # Runs without --run-dir land under the temp dir: keep them in ours.
         for var in ("TMPDIR", "TEMP", "TMP"):
             os.environ[var] = str(self.tmp)
+        tempfile.tempdir = None
+        self.addCleanup(setattr, tempfile, "tempdir", None)
         os.environ["CODDY_HOME"] = str(self.tmp / "coddy")
         os.environ.pop("CROSSREVIEW_ROSTER", None)
         os.environ.pop("CROSSREVIEW_DEPTH", None)
@@ -371,6 +381,63 @@ class RosterTest(TempCase):
         self.assertNotIn("prompt_via", data["reviewers"][0])
         self.assertEqual(data["reviewers"][1]["host"], "coddy")
 
+    def test_a_model_id_is_never_shell(self):
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        write_stub(bin_dir, "claude", version="Claude Code 2")
+        env = dict(os.environ, PATH=os.pathsep.join([str(bin_dir), tools_path(self.tmp)]))
+        for bad in ("sonnet; rm -rf ~", "x & y", "a$(id)", "m`id`", "a b"):
+            rc, _, err = self.helper("init", "claude:%s" % bad, env=env)
+            self.assertEqual(rc, cr.EXIT_ERROR, bad)
+            self.assertIn("characters a command line would interpret", err)
+        rc, _, err = self.helper("init", "claude:claude-opus-4-8[context=1m,effort=high]", env=env)
+        self.assertEqual(rc, 0, err)
+
+    def test_a_roster_named_inside_the_workspace_needs_approval(self):
+        repo = self.make_repo()
+        roster = repo / "review.json"
+        roster.write_text(json.dumps({"reviewers": [{"kind": "cli", "command": "evil < {brief} > {out}"}]}))
+        rc, out, _ = self.helper("roster", "--roster", roster, cwd=repo)
+        self.assertEqual(rc, cr.EXIT_NEEDS_APPROVAL, out)
+        env = dict(os.environ, CROSSREVIEW_ROSTER=str(roster))
+        rc, out, _ = self.helper("roster", cwd=repo, env=env)
+        self.assertEqual(rc, cr.EXIT_NEEDS_APPROVAL, out)
+        rc, out, err = self.helper("trust", "--roster", roster, cwd=repo)
+        self.assertEqual(rc, 0, out + err)
+        rc, out, _ = self.helper("roster", "--roster", roster, cwd=repo)
+        self.assertEqual(rc, 0, out)
+        outside = self.tmp / "mine.json"
+        outside.write_text(json.dumps({"reviewers": []}))
+        rc, out, _ = self.helper("roster", "--roster", outside, cwd=repo)
+        self.assertEqual(rc, 0, out)
+
+    def test_import_add_keeps_what_was_there(self):
+        home = self.tmp / "home"
+        home.mkdir()
+        (home / "roster.json").write_text(json.dumps({"version": 1, "reviewers": [{"name": "mine", "command": "a < {brief} > {out}"}]}))
+        legacy = self.tmp / "legacy.json"
+        legacy.write_text(json.dumps({"version": 1, "reviewers": [{"name": "theirs", "command": "b < {brief} > {out}"}]}))
+        rc, _, err = self.helper("init", "--import", legacy, "--add")
+        self.assertEqual(rc, 0, err)
+        names = [r["name"] for r in json.loads((home / "roster.json").read_text())["reviewers"]]
+        self.assertEqual(names, ["mine", "theirs"])
+
+    @unittest.skipIf(IS_WINDOWS, "ownership and modes are the POSIX half")
+    def test_the_run_root_is_private(self):
+        root = cr.run_root()
+        self.assertEqual(root.parent, self.tmp)
+        self.assertEqual(os.stat(str(root)).st_mode & 0o777, 0o700)
+        os.chmod(str(root), 0o755)
+        cr.run_root()
+        self.assertEqual(os.stat(str(root)).st_mode & 0o777, 0o700)
+        run = cr.new_run_dir(None)
+        self.assertTrue(cr.RUN_NAME.match(run.name), run.name)
+        self.assertEqual(os.stat(str(run)).st_mode & 0o777, 0o700)
+        shutil.rmtree(str(root))
+        os.symlink(str(self.tmp / "elsewhere"), str(root))
+        with self.assertRaises(cr.CrossreviewError):
+            cr.run_root()
+
     def test_unknown_agent_and_missing_model(self):
         rc, _, err = self.helper("init", "nosuch:model")
         self.assertEqual(rc, cr.EXIT_ERROR)
@@ -599,6 +666,54 @@ class RunTest(TempCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("lost", out)
         self.assertIn("the supervisor is gone", out)
+        deadline = time.time() + 10
+        while time.time() < deadline and cr.pid_alive(int(reviewer_pid)):
+            time.sleep(0.2)
+        self.assertFalse(cr.pid_alive(int(reviewer_pid)), "a lost run's reviewers are stopped")
+        self.assertTrue(json.loads((run_dir / "status.json").read_text(encoding="utf-8")).get("lost"))
+
+    def test_a_short_review_about_401s_is_a_review(self):
+        roster = self.roster([{"name": "short", "command": self.command("short-401")},
+                              {"name": "soft", "command": self.command("soft-fail")}])
+        rc, out, status, _ = self.run_and_wait(roster)
+        by_name = {r["name"]: r for r in status["reviewers"]}
+        self.assertEqual(by_name["short"]["status"], "done", out)
+        self.assertEqual(by_name["soft"]["status"], "failed", out)
+
+    @unittest.skipIf(IS_WINDOWS, "process groups are the POSIX half; taskkill /T covers Windows")
+    def test_a_timeout_kills_children_that_ignore_sigterm(self):
+        pidfile = self.tmp / "child.pid"
+        roster = self.roster([{"name": "stubborn", "timeout": 3,
+                               "command": '"%s" "%s" stubborn "%s" > {out}' % (
+                                   Path(sys.executable).as_posix(), self.stub.as_posix(), pidfile.as_posix())}])
+        rc, out, status, _ = self.run_and_wait(roster)
+        self.assertEqual(status["reviewers"][0]["status"], "timeout", out)
+        child = int(pidfile.read_text())
+        deadline = time.time() + 10
+        while time.time() < deadline and cr.pid_alive(child):
+            time.sleep(0.2)
+        self.assertFalse(cr.pid_alive(child), "the child that ignored SIGTERM must be gone")
+
+    def test_a_brief_too_long_for_an_argument_is_refused_up_front(self):
+        self.brief.write_text("x" * (cr.ARG_LIMIT + 10), encoding="utf-8")
+        roster = self.roster([{"name": "arg", "command": '"%s" -c "print(1)" "$(cat {brief})" > {out}'
+                               % Path(sys.executable).as_posix()},
+                              {"name": "good", "command": self.command("ok")}])
+        rc, out, status, _ = self.run_and_wait(roster)
+        by_name = {r["name"]: r for r in status["reviewers"]}
+        self.assertEqual(by_name["arg"]["status"], "failed")
+        self.assertIn("command-line argument", by_name["arg"]["note"])
+        self.assertEqual(by_name["good"]["status"], "done")
+
+    def test_model_placeholder_and_unsafe_names(self):
+        roster = self.roster([{"name": "../../evil", "model": "m1",
+                               "command": '"%s" -c "import sys; print(sys.argv[1])" {model} > {out}'
+                               % Path(sys.executable).as_posix()}])
+        rc, out, status, run_dir = self.run_and_wait(roster)
+        r = status["reviewers"][0]
+        self.assertEqual(r["name"], "evil")
+        self.assertEqual(Path(r["out"]).parent, run_dir / "reviews")
+        self.assertEqual(Path(r["out"]).read_text().strip(), "m1")
 
     def test_a_reviewer_cannot_start_another_crossreview(self):
         roster = self.roster([{"name": "good", "command": self.command("ok")}])
@@ -617,6 +732,12 @@ class RunTest(TempCase):
         self.assertEqual(by_name["claude-sonnet"]["status"], "host")
         self.assertEqual(by_name["coddy-devin-swe-2"]["status"], "skipped")
         self.assertIn("quorum met once the internal reviewers you run answer", out)
+
+    def test_a_run_of_internal_reviewers_only(self):
+        roster = self.roster([{"kind": "internal", "host": "claude", "model": "sonnet"}], min_reviewers=1)
+        rc, out, status, _ = self.run_and_wait(roster, "--host", "claude")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(status["reviewers"][0]["status"], "host")
 
     def test_listing_shows_paths_relative_to_the_run(self):
         roster = self.roster([{"name": "good", "command": self.command("ok")}])

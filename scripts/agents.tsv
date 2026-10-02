@@ -4,6 +4,8 @@
 # marker: a word --version or --help must print, so an unrelated executable of the same name is skipped.
 # models: arguments that list the agent's models, '-' when it has no such command.
 # posix / powershell: command templates; {bin}, {model}, {brief} and {out} are placeholders.
+# Every template feeds the brief through stdin or a file flag, except koda's: that CLI takes the
+# prompt only as an argument, and the helper refuses it when the brief is too long for one.
 # The PowerShell column hands redirection to cmd.exe (--% passes the rest verbatim), which moves
 # bytes as they are: PowerShell's own | and > re-encode text (UTF-16, the OEM code page).
 # agent	binaries	marker	models	posix	powershell

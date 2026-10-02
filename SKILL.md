@@ -33,10 +33,17 @@ Three rules hold for the whole run:
 3. **You decide, not the majority.** One reviewer with evidence outweighs four without it. Your
    verdict may differ from every reviewer's.
 
-`<skill>` below is the directory holding this SKILL.md. The helper is
-`python3 <skill>/scripts/crossreview.py` (`py -3` or `python` on Windows), standard library only,
-the same on Linux, macOS and Windows; every subcommand has `--help`. Without Python, see the last
-section.
+`<skill>` below is the directory holding this SKILL.md; agents usually say where it is when they
+load a skill (Claude Code's "Base directory", Coddy's "Skill directory"). If yours did not, take
+the first of these that holds `scripts/crossreview.py`, and do not search the whole disk:
+`${CODDY_HOME:-~/.coddy}/skills/crossreview`, then `crossreview` under `~/.claude/skills`,
+`~/.codex/skills`, `~/.cursor/skills`, `~/.agents/skills`, `~/.config/opencode/skills`,
+`~/.config/devin/skills`, and under the workspace's `.claude/skills`, `.agents/skills`,
+`.cursor/skills`, `.opencode/skills`, `.coddy/skills`.
+
+The helper is `python3 <skill>/scripts/crossreview.py` (`py -3` or `python` on Windows), standard
+library only, the same on Linux, macOS and Windows; every subcommand has `--help`. Without Python,
+see the last section.
 
 **Requirements.** A shell and permission to write files: in a read-only mode (plan, ask) say so
 and stop. Reviewers call their model APIs and write their own session files, so a sandbox that
@@ -48,12 +55,15 @@ the brief directly and do not start another crossreview.
 
 ## Inside Coddy
 
-If you are Coddy and `spawn_agent` offers the `crossreview` agent, that coordinator is the
-orchestrator. Do steps 1 and 2 here, then `spawn_agent` with `agent: "crossreview"` in the
-foreground, with a prompt naming the brief file, the roster file and `<skill>`. It runs the CLI
-reviewers as background tasks and its own internal reviewers on any model Coddy is signed into,
-collects every answer, verifies and decides. Its report is the final word: relay it to the user
-as it is.
+Coddy ships a built-in coordinator subagent named `crossreview`. It is hidden, so it is not among
+the agents you see listed, but `spawn_agent` accepts it. If you are Coddy, that coordinator is the
+orchestrator: do steps 1 and 2 here, then call `spawn_agent` with `agent: "crossreview"` in the
+foreground and a prompt naming the brief file, the roster file and `<skill>`: the roster is the
+path `crossreview.py roster` printed, or for one-off reviewers a file you write with
+`crossreview.py init --path <tmp>/roster.json agent:model ...`. It runs the CLI reviewers as background tasks and
+its own internal reviewers on any model Coddy is signed into, collects every answer, verifies and
+decides. Its report is the final word: relay it to the user as it is. Only if `spawn_agent` refuses
+the name, do steps 3 to 5 yourself.
 
 ## 1. Reviewers
 
@@ -65,8 +75,9 @@ Otherwise run `crossreview.py roster` and act on its exit code:
 - **0**: use it. Relay its warnings (a brief passed as an argument breaks past 128 KB) and offer
   `crossreview.py init --import <path> --refresh` to move the entries to the current templates.
   A roster of origin `coddy` is Coddy's; the same command makes it the shared one.
-- **4**: the roster came with the workspace and would run the commands it prints. Show them to the
-  user and ask; only after a clear yes run `crossreview.py trust`. On a no, treat it as absent.
+- **4**: the roster came with the workspace (found there, or named with `--roster` inside the
+  repository) and would run the commands it prints. Show them to the user and ask; only after a
+  clear yes run the `crossreview.py trust ...` line it printed. On a no, treat it as absent.
 - **2**: no roster. Set one up.
 
 Setup (also when the user asks for `/crossreview setup`):
@@ -172,6 +183,8 @@ fresh brief, and its reviewers again see nothing of the first round's answers.
 `sh <skill>/scripts/detect-agents.sh` (`powershell -ExecutionPolicy Bypass -File
 <skill>\scripts\detect-agents.ps1` on Windows) prints the same detection lines. Write the roster
 by hand (`references/roster.md`) and the brief by hand (`references/brief.md`). For each reviewer
-substitute the quoted paths of the brief and of its output file for `{brief}` and `{out}` and start
-the command with your own background shell tool, each under a time limit; wait for all of them,
-then continue at step 4.
+substitute the quoted paths of the brief and of its output file for `{brief}` and `{out}`, put
+`CROSSREVIEW_DEPTH=1 ` in front of the command (`$env:CROSSREVIEW_DEPTH = '1'; ` in PowerShell) so
+the reviewer knows not to start a crossreview of its own, and start it with your own background
+shell tool in an empty directory, each under a time limit; wait for all of them, then continue at
+step 4.

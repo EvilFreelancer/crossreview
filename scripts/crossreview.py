@@ -32,6 +32,7 @@ import secrets
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -119,7 +120,10 @@ def _popen_group_kwargs():
 
 
 def kill_tree(pid: int, grace: float = 5.0, proc: Optional[subprocess.Popen] = None) -> None:
-    """Stop a process and everything it started (its process group, its tree on Windows)."""
+    """Stop a process and everything it started (its process group, its tree on Windows).
+
+    The group is watched, not only its leader: an agent CLI whose child ignores
+    SIGTERM keeps running after the leader exits, and gets SIGKILL with the rest."""
     if IS_WINDOWS:
         subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -132,11 +136,21 @@ def kill_tree(pid: int, grace: float = 5.0, proc: Optional[subprocess.Popen] = N
             return
         deadline = time.time() + grace
         while time.time() < deadline:
-            if proc is not None and proc.poll() is not None:
-                return
-            if proc is None and not pid_alive(pid):
+            if proc is not None:
+                proc.poll()
+            if not _group_alive(pid):
                 return
             time.sleep(0.1)
+
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def pid_alive(pid: int) -> bool:
@@ -411,17 +425,33 @@ class RosterLocation:
         return self.origin == "workspace" and not is_trusted(self.workspace, self.path, self.digest)
 
 
+def _named_roster(path: Path, origin: str, workspace: Optional[str]) -> RosterLocation:
+    """A roster named on the command line or in the environment. One that lives
+    inside the workspace came with the checkout, whatever named it, and needs the
+    same approval as one found there."""
+    path = path.resolve()
+    ws = git_toplevel(Path(workspace or os.getcwd()).expanduser().resolve())
+    if ws is None:
+        # Not a checkout: nothing here arrived with a clone.
+        return RosterLocation(path, origin)
+    try:
+        path.relative_to(ws.resolve())
+    except ValueError:
+        return RosterLocation(path, origin)
+    return RosterLocation(path, "workspace", ws)
+
+
 def locate_roster(explicit: Optional[str] = None, workspace: Optional[str] = None) -> Optional[RosterLocation]:
     if explicit:
         path = Path(explicit).expanduser()
         if not path.is_file():
             raise CrossreviewError("roster %s does not exist" % path)
-        return RosterLocation(path.resolve(), "explicit")
+        return _named_roster(path, "explicit", workspace)
     if os.environ.get("CROSSREVIEW_ROSTER"):
         path = Path(os.environ["CROSSREVIEW_ROSTER"]).expanduser()
         if not path.is_file():
             raise CrossreviewError("CROSSREVIEW_ROSTER names %s, which does not exist" % path)
-        return RosterLocation(path.resolve(), "env")
+        return _named_roster(path, "env", workspace)
     if user_roster_path().is_file():
         return RosterLocation(user_roster_path(), "user")
     if legacy_coddy_roster().is_file():
@@ -485,8 +515,15 @@ def load_roster(path: Path) -> dict:
     return data
 
 
+WINDOWS_RESERVED = {"con", "prn", "aux", "nul"} | {"com%d" % i for i in range(1, 10)} | {"lpt%d" % i for i in range(1, 10)}
+
+
 def slug(text: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-") or "reviewer"
+    """A reviewer name that is safe as a single file name on every system."""
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-.")[:80] or "reviewer"
+    if name.split(".")[0].lower() in WINDOWS_RESERVED:
+        name = "reviewer-" + name
+    return name
 
 
 def normalize_entries(roster: dict, origin: str = "user") -> List[dict]:
@@ -501,12 +538,12 @@ def normalize_entries(roster: dict, origin: str = "user") -> List[dict]:
         if entry["kind"] == "internal" and not entry.get("host"):
             # Coddy wrote the first rosters, and its internal reviewers are its own subagents.
             entry["host"] = "coddy"
-        base = entry.get("name") or slug("%s-%s" % (
+        base = slug(entry.get("name") or "%s-%s" % (
             entry.get("agent") or entry.get("host") or entry["kind"], entry.get("model") or "default"))
         name, n = base, 2
-        while name in seen:
+        while name.lower() in seen:
             name, n = "%s-%d" % (base, n), n + 1
-        seen.add(name)
+        seen.add(name.lower())
         entry["name"] = name
         out.append(entry)
     return out
@@ -533,10 +570,13 @@ def entry_warnings(entry: dict, table: Dict[str, AgentSpec]) -> List[str]:
             warnings.append("command has no %s placeholder" % placeholder)
     if "{model}" in command:
         warnings.append("command still holds {model}: write the model into it")
-    for pattern, text in KNOWN_ISSUES:
-        if pattern.search(command):
-            warnings.append(text)
     spec = table.get(entry.get("agent", ""))
+    for pattern, text in KNOWN_ISSUES:
+        if pattern.search(command) and not (spec and spec.agent == "koda" and "argument" in text):
+            warnings.append(text)
+    if spec and spec.agent == "koda":
+        warnings.append("koda takes the brief only as a command-line argument: a brief over %s cannot reach it"
+                        % human_bytes(ARG_LIMIT))
     if spec and entry.get("model") and entry.get("binary"):
         current = fill(spec.template(), bin=entry["binary"], model=entry["model"])
         if current != command and not any(t in w for w in warnings for t in ("argument", "-p -i", "re-encodes")):
@@ -583,19 +623,28 @@ def cmd_roster(args) -> int:
     if loc.needs_approval:
         print("\nThis roster came with the workspace and runs the commands above. It is used only after "
               "the user approves this exact file (sha256 %s): show them the commands, and on a yes run "
-              "`crossreview.py trust --workspace %s`." % (loc.digest, loc.workspace))
+              "`crossreview.py trust --workspace %s --roster %s`." % (loc.digest, loc.workspace, loc.path))
         return EXIT_NEEDS_APPROVAL
     return EXIT_OK
 
 
 def cmd_trust(args) -> int:
     ws = canonical_workspace(Path(args.workspace or os.getcwd()))
-    for rel in WORKSPACE_ROSTERS:
-        path = ws / rel
-        if path.is_file():
-            break
+    if args.roster:
+        path = Path(args.roster).expanduser().resolve()
+        try:
+            path.relative_to(ws.resolve())
+        except ValueError:
+            raise CrossreviewError("%s is not inside the workspace %s; only a workspace roster needs approval" % (path, ws))
+        if not path.is_file():
+            raise CrossreviewError("roster %s does not exist" % path)
     else:
-        raise CrossreviewError("no workspace roster under %s" % ws)
+        for rel in WORKSPACE_ROSTERS:
+            path = ws / rel
+            if path.is_file():
+                break
+        else:
+            raise CrossreviewError("no workspace roster under %s" % ws)
     digest = sha256_file(path)
     data = _read_json(trust_path(), {"version": 1, "approvals": []})
     approvals = [a for a in data.get("approvals", [])
@@ -612,10 +661,21 @@ def parse_spec(spec: str) -> Tuple[str, Optional[str], Optional[str]]:
     """'agent:model' -> (agent, model, None); 'internal/host:model' -> ('internal', model, host)."""
     head, sep, model = spec.partition(":")
     model = model if sep else None
-    if head.startswith("internal"):
+    if head == "internal" or head.startswith("internal/"):
         _, _, host = head.partition("/")
         return "internal", model, host or None
     return head, model, None
+
+
+# What a model id may hold: provider/model, tags (gpt-oss:120b), variants
+# (claude-opus-4-8[context=1m,effort=high]). Nothing a shell would read.
+MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+=,\[\]-]*$")
+
+
+def check_model_id(model: str) -> None:
+    if not MODEL_ID.match(model) or len(model) > 200:
+        raise CrossreviewError("model id %r holds characters a command line would interpret; "
+                               "write the command into the roster by hand if the CLI really needs them" % model)
 
 
 def build_entries(specs: List[str], table: Dict[str, AgentSpec], windows: bool = IS_WINDOWS) -> List[dict]:
@@ -630,8 +690,11 @@ def build_entries(specs: List[str], table: Dict[str, AgentSpec], windows: bool =
         if agent == "internal":
             if not host or not model:
                 raise CrossreviewError("an internal reviewer is internal/<host>:<model>, e.g. internal/claude:sonnet")
+            check_model_id(model)
             entries.append({"kind": "internal", "host": host, "model": model})
             continue
+        if model:
+            check_model_id(model)
         if agent not in found:
             raise CrossreviewError("%s is not installed or did not answer --version/--help" % agent)
         det = found[agent]
@@ -640,6 +703,8 @@ def build_entries(specs: List[str], table: Dict[str, AgentSpec], windows: bool =
             raise CrossreviewError("%s needs a model: %s:<model id>" % (agent, agent))
         entry = {"kind": "cli", "agent": agent, "binary": det.binary,
                  "command": fill(det.template, model=model or "")}
+        if agent != "koda" and plan_command(entry["command"])["mode"] != "exec":
+            raise CrossreviewError("the command built for %s is not a plain command line: %s" % (agent, entry["command"]))
         if model:
             entry["model"] = model
         entries.append(entry)
@@ -656,8 +721,9 @@ def refresh_entries(entries: List[dict], table: Dict[str, AgentSpec]) -> List[di
         e = dict(e)
         spec = table.get(e.get("agent", ""))
         if e.get("kind", "cli") == "cli" and spec and e.get("model"):
-            binary = e.get("binary") if e.get("binary") in spec.binaries else None
-            binary = binary or (found[spec.agent].binary if spec.agent in found else None)
+            # What detection verifies now wins over what the roster remembers: the
+            # name `agent` may point at another program today.
+            binary = found[spec.agent].binary if spec.agent in found else None
             if binary:
                 e["binary"] = binary
                 e["command"] = fill(spec.template(), bin=binary, model=e["model"])
@@ -677,6 +743,10 @@ def cmd_init(args) -> int:
                 e["host"] = "coddy"
         if args.refresh:
             roster["reviewers"] = refresh_entries(roster.get("reviewers", []), load_table())
+        if args.add and target.is_file():
+            old = load_roster(target)
+            old["reviewers"] = old.get("reviewers", []) + roster.get("reviewers", [])
+            roster = old
     else:
         if not args.reviewers:
             raise CrossreviewError("name the reviewers, e.g. `init cursor:auto coddy:codex/gpt-5.6-sol`")
@@ -748,6 +818,13 @@ TOOLS_LINE = {
 }
 
 
+def read_input(path, what: str) -> str:
+    path = Path(path).expanduser()
+    if not path.is_file():
+        raise CrossreviewError("%s %s does not exist" % (what, path))
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
 def build_brief(args) -> Tuple[str, dict]:
     ws = Path(args.workspace or os.getcwd()).expanduser().resolve()
     pathspec = []
@@ -758,7 +835,7 @@ def build_brief(args) -> Tuple[str, dict]:
     sections = []
     if args.doc:
         doc = Path(args.doc).expanduser()
-        text = doc.read_text(encoding="utf-8", errors="replace")
+        text = read_input(doc, "document")
         scope = args.scope or "the document %s" % doc
         sections.append(("The document under review: %s" % doc.name, text, "markdown"))
         stats["files"] = 1
@@ -766,7 +843,7 @@ def build_brief(args) -> Tuple[str, dict]:
         scope = args.scope or "the files %s" % ", ".join(args.files)
         for name in args.files:
             path = (ws / name) if not Path(name).is_absolute() else Path(name)
-            text = path.read_text(encoding="utf-8", errors="replace")
+            text = read_input(path, "file")
             sections.append(("File %s" % name, text, ""))
         stats["files"] = len(args.files)
     else:
@@ -808,10 +885,10 @@ def build_brief(args) -> Tuple[str, dict]:
                              "\n".join(skipped), ""))
     intent = args.intent
     if args.intent_file:
-        intent = Path(args.intent_file).expanduser().read_text(encoding="utf-8").strip()
+        intent = read_input(args.intent_file, "intent file").strip()
     notes = ""
     if args.notes_file:
-        notes = Path(args.notes_file).expanduser().read_text(encoding="utf-8").strip()
+        notes = read_input(args.notes_file, "notes file").strip()
 
     out = [TOOLS_LINE[args.tools], "", "# Code review brief", "",
            "You are one of several independent reviewers in a cross-review: other agents on other models review "
@@ -882,6 +959,9 @@ def human_secs(s: Optional[float]) -> str:
     return "%dh%02dm" % (s // 3600, (s % 3600) // 60)
 
 
+# One command-line argument: Linux caps it at 128 KB (MAX_ARG_STRLEN), Windows
+# the whole command line at 32 767 characters.
+ARG_LIMIT = 30_000 if IS_WINDOWS else 120_000
 ARG_BRIEF = {'$(cat {brief})', '$(Get-Content -Raw {brief})', '$(Get-Content -Raw -Encoding UTF8 {brief})'}
 PS_PREFIX = ["Get-Content", "-Raw"]
 SHELL_ONLY = {";", "&", "&&", "||", "(", ")", "`"}
@@ -953,7 +1033,7 @@ def render_shell(command: str, brief: str, out: str) -> List[str]:
     return [shutil.which("sh") or "/bin/sh", "-c", rendered]
 
 
-RUN_NAME = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{4}$")
+RUN_NAME = re.compile(r"^\d{8}-\d{6}-[A-Za-z0-9_]{4,}$")
 KEEP_RUNS_DAYS = 7
 
 
@@ -963,7 +1043,8 @@ def prune_old_runs(root: Path, days: int = KEEP_RUNS_DAYS) -> None:
     cutoff = time.time() - days * 86400
     for path in root.iterdir() if root.is_dir() else []:
         try:
-            if not (path.is_dir() and RUN_NAME.match(path.name) and path.stat().st_mtime < cutoff):
+            if not (path.is_dir() and not path.is_symlink() and RUN_NAME.match(path.name)
+                    and path.stat().st_mtime < cutoff):
                 continue
             status = json.loads((path / "status.json").read_text(encoding="utf-8"))
             if status.get("done") and float(status.get("updated") or 0) < cutoff:
@@ -972,19 +1053,34 @@ def prune_old_runs(root: Path, days: int = KEEP_RUNS_DAYS) -> None:
             continue
 
 
+def run_root() -> Path:
+    """The per-user directory runs live in. Briefs hold whole diffs, so on a
+    shared machine it must be ours and closed to everybody else: a directory
+    another user created under the same name, or a symlink, is refused."""
+    user = re.sub(r"\W", "", os.environ.get("USER") or os.environ.get("USERNAME") or "user") or "user"
+    root = Path(tempfile.gettempdir()) / ("crossreview-%s" % user)
+    try:
+        root.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    if not IS_WINDOWS:
+        st = os.lstat(str(root))
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+            raise CrossreviewError("%s is not a directory of yours; pass --run-dir" % root)
+        if st.st_mode & 0o077:
+            os.chmod(str(root), 0o700)
+    return root
+
+
 def new_run_dir(base: Optional[str]) -> Path:
     if base:
         path = Path(base).expanduser()
         path.mkdir(parents=True, exist_ok=True)
         return path.resolve()
-    user = re.sub(r"\W", "", os.environ.get("USER") or os.environ.get("USERNAME") or "user") or "user"
-    root = Path(tempfile.gettempdir()) / ("crossreview-%s" % user)
-    root.mkdir(parents=True, exist_ok=True)
+    root = run_root()
     prune_old_runs(root)
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    path = root / ("%s-%s" % (stamp, secrets.token_hex(2)))
-    path.mkdir()
-    return path
+    return Path(tempfile.mkdtemp(prefix=stamp + "-", dir=str(root)))
 
 
 def select_entries(args) -> Tuple[List[dict], int, int, str]:
@@ -1033,12 +1129,22 @@ def prepare_run(entries: List[dict], brief_src: Path, run_dir: Path, cwd: Option
             reviewers.append(item)
             continue
         command = e.get("command") or ""
+        if "{model}" in command and e.get("model"):
+            command = command.replace("{model}", e["model"])
         item["command"] = command
         plan = plan_command(command)
         if plan["mode"] == "exec":
             argv = [a.replace("{brief}", str(brief)).replace("{out}", str(out)) for a in plan["argv"]]
             if any(a in ARG_BRIEF for a in plan["argv"]):
                 text = brief.read_text(encoding="utf-8")
+                if len(text.encode("utf-8")) > ARG_LIMIT:
+                    item.update({"status": "failed", "mode": "exec", "argv": [], "rc": None, "bytes": 0,
+                                 "note": "this CLI takes the brief as a command-line argument, which holds at most "
+                                         "%s here; the brief is %s" % (human_bytes(ARG_LIMIT),
+                                                                        human_bytes(len(text.encode("utf-8"))))})
+                    item["display"] = command
+                    reviewers.append(item)
+                    continue
                 argv = [text if a in ARG_BRIEF else b for a, b in zip(plan["argv"], argv)]
             stdin = plan["stdin"]
             if stdin == "{brief}":
@@ -1059,8 +1165,8 @@ def prepare_run(entries: List[dict], brief_src: Path, run_dir: Path, cwd: Option
             item["display"] = item["display"].replace(prefix, "")
         item["status"] = "queued"
         reviewers.append(item)
-    if not any(r["status"] == "queued" for r in reviewers):
-        raise CrossreviewError("no CLI reviewer to run (check the names, `enabled` and the roster)")
+    if not reviewers:
+        raise CrossreviewError("no reviewer to run (check the names, `enabled` and the roster)")
     plan = {"version": 1, "run_dir": str(run_dir), "brief": str(brief), "cwd": str(work),
             "created": _dt.datetime.now().isoformat(timespec="seconds"), "source": source,
             "min_reviewers": min_reviewers, "reviewers": reviewers}
@@ -1099,11 +1205,15 @@ def tail_text(path: str, limit: int = 4000) -> str:
         return ""
 
 
-def failure_hint(item: dict) -> str:
-    text = tail_text(item["err"]) + "\n" + tail_text(item.get("log", "")) + "\n" + tail_text(item["out"], 2000)
+def failure_hint(item: dict, include_out: bool = True) -> str:
+    text = tail_text(item["err"]) + "\n" + tail_text(item.get("log", ""))
+    if include_out:
+        text += "\n" + tail_text(item["out"], 2000)
     for pattern, hint in HINTS:
         if pattern.search(text):
             return hint
+    if not include_out:
+        return ""
     lines = [ln.strip() for ln in tail_text(item["err"]).splitlines() if ln.strip()]
     return lines[-1][:200] if lines else ""
 
@@ -1129,11 +1239,16 @@ def finish_item(item: dict, rc: Optional[int], status: Optional[str] = None, not
         return
     hint = failure_hint(item)
     if rc == 0 and text.strip():
-        # A CLI that prints an API error and exits 0 still left no review.
-        if hint and not item["verdict"] and len(text.strip()) < 600:
-            item["status"], item["note"] = "failed", hint
+        # A CLI that prints an API error and exits 0 still left no review. Only
+        # the CLI's own streams, or an answer that opens like an error, say so:
+        # a short review may well talk about 401s and rate limits.
+        side = failure_hint(item, include_out=False)
+        first = next((ln for ln in text.splitlines() if ln.strip()), "")
+        error_like = re.match(r"(?i)^\W*(error|fatal|exception|traceback)\b", first) is not None
+        if not item["verdict"] and len(text.strip()) < 600 and (side or error_like):
+            item["status"], item["note"] = "failed", side or hint or first.strip()[:200]
         else:
-            item["status"], item["note"] = "done", hint if len(text.strip()) < 600 else ""
+            item["status"], item["note"] = "done", side
     elif rc == 0:
         item["status"], item["note"] = "empty", hint or "exited 0 without a review"
     else:
@@ -1250,7 +1365,7 @@ def spawn_supervisor(run_dir: Path, parallel: int) -> int:
 
 def cmd_run(args) -> int:
     depth = int(os.environ.get(DEPTH_ENV, "0") or 0)
-    if depth > 0 and not args.force:
+    if depth > 0:
         raise CrossreviewError("this process is itself a crossreview reviewer (%s=%d): review the brief directly "
                                "instead of starting another fan-out" % (DEPTH_ENV, depth))
     brief = Path(args.brief).expanduser()
@@ -1300,12 +1415,17 @@ def load_status(run_dir: Path) -> dict:
         time.sleep(1.0)
         status = _read_json(run_dir / "status.json", status)
         if _supervisor_gone(status):
+            # Its reviewers would go on writing outputs nobody tracks (and a
+            # retry would race them): stop them and write the outcome down.
             for r in status["reviewers"]:
+                if r["status"] == "running" and r.get("pid"):
+                    kill_tree(int(r["pid"]), grace=2.0)
                 if r["status"] in ("queued", "running"):
                     r["status"] = "lost"
                     r["note"] = "the supervisor is gone (killed with the shell that started it?)"
             status["done"] = True
             status["lost"] = True
+            _write_json(run_dir / "status.json", status)
     return status
 
 
@@ -1555,6 +1675,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("trust", help="approve the workspace roster (only after the user agreed)")
     s.add_argument("--workspace")
+    s.add_argument("--roster", help="the roster file inside the workspace (default: .agents/crossreview.json)")
     s.set_defaults(func=cmd_trust)
 
     s = sub.add_parser("brief", help="write a review brief")
@@ -1597,7 +1718,6 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--parallel", type=int, default=0, help="at most N reviewers at once (default: all)")
     s.add_argument("--host", help="the agent driving the run (claude, coddy, ...): marks its internal reviewers")
     s.add_argument("--foreground", action="store_true", help="wait here instead of in the background")
-    s.add_argument("--force", action="store_true", help="start even inside another crossreview reviewer")
     s.set_defaults(func=cmd_run)
 
     s = sub.add_parser("wait", help="wait for a run, then print its status")

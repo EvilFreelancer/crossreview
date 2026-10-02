@@ -126,7 +126,8 @@ worth fixing, the ones it rejected with the evidence, and whether the quorum was
 | Koda | `koda "<brief>"` | kept from Coddy's original list |
 
 The brief never travels as a command-line argument (a 138 KB brief that way fails with
-`Argument list too long` before the model is even called), stdin is closed for every reviewer, and
+`Argument list too long` before the model is even called; Koda, which takes nothing else, gets a
+brief only while it fits), stdin is closed for every reviewer, and
 each one runs in its CLI's read-only mode inside an empty directory. [references/agents.md](references/agents.md)
 has the details of every CLI, its pitfalls and how to recover an answer from a reviewer that timed out.
 

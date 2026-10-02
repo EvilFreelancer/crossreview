@@ -9,7 +9,8 @@ IMPORTANT: answer from this brief alone. Do not call tools, do not read or searc
 # Code review brief
 
 You are one of several independent reviewers in a cross-review: other agents on other models review
-the same change, and the findings are merged and checked against the code afterwards. Look for real
+the same change without seeing each other's answers, and an orchestrator checks every finding against
+the code and decides what to act on. Look for real
 defects: wrong behaviour, crashes, data loss, races, security holes, broken contracts, missing or
 wrong tests, and documentation the change leaves stale. Skip style preferences unless they hide a
 bug. In a diff, lines starting with `-` are the old code: judge the new version.
@@ -35,9 +36,9 @@ Questions and doubts go in a separate list after the findings. No praise and no 
 change. If you find nothing, say so. End with one line: `VERDICT: approve`,
 `VERDICT: approve with changes` or `VERDICT: needs rework`. Write in English.
 
-## Already reviewed and rejected
+## Notes from the orchestrator
 
-<round two and later: each rejected finding with the evidence that disproved it>
+<optional: facts about the code and decisions you already took, in your own words>
 
 ## The change
 
@@ -59,7 +60,10 @@ Why each part is there:
 - **The answer format.** A numbered list with `path:line`, severity and a fix is what makes the
   answers of five different models mergeable; the `VERDICT:` line lets the helper show each
   reviewer's verdict in the status table.
-- **The rejected list.** In a second round reviewers otherwise repeat the first round's false alarms.
+- **The notes.** Only what the orchestrator itself knows or decided, with no reviewer's text, no
+  paraphrase of a finding and no names: reviewers stay blind to each other in every round. A second
+  round gets a fresh brief of the fixed change, and repeated false alarms are rejected again by the
+  orchestrator, not suppressed by showing reviewers what others said.
 - **The fence.** The helper picks a fence longer than any run of backticks inside the diff, so a
   Markdown file in the change cannot close the block early.
 

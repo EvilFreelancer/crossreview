@@ -29,10 +29,10 @@ edited by hand: it is ordinary configuration, read fresh on every run.
 | `min_reviewers` | The quorum: fewer answers than this and the report says **insufficient quorum**. Default 2. |
 | `timeout` | Seconds each reviewer gets, default 2700. A reviewer's own `timeout` wins. |
 | `reviewers[].kind` | `cli` (an external CLI started by the helper) or `internal` (a subagent of a host agent). Default `cli`. |
-| `reviewers[].name` | Label in the status and the report, also the file name of the review. Default `<agent>-<model>`. |
+| `reviewers[].name` | Label in the status and the report, also the file name of the review. Default `<agent>-<model>`. Reduced to letters, digits, `.`, `_` and `-`. |
 | `reviewers[].agent` | Row of `scripts/agents.tsv` the entry came from; used for warnings and `init --refresh`. |
 | `reviewers[].binary` | The binary detection found (`agent`, `cursor-agent`, a path). Informational: the command is what runs. |
-| `reviewers[].model` | The model written into the command. |
+| `reviewers[].model` | The model written into the command; a `{model}` left in `command` is filled with it. Letters, digits and `._:/@+=,[]-` only. |
 | `reviewers[].command` | What runs, with `{brief}` and `{out}` left as placeholders. Authoritative: it runs exactly as written, so a wrapper, a proxy alias or an extra flag (`-c model_reasoning_effort=high`) belongs here. |
 | `reviewers[].enabled` | `false` keeps the entry without running it. |
 | `reviewers[].host` | For `internal`: the agent that runs it as its own subagent (`claude`, `coddy`, `opencode`). Other hosts skip it. |
@@ -57,12 +57,16 @@ The helper takes the first of these that exists:
 5. a workspace roster, `.agents/crossreview.json` or `.coddy/crossreview.json` at the repository
    root, used only when none of the above exists and only once the user has approved it.
 
+A roster named with `--roster` or `$CROSSREVIEW_ROSTER` that lies inside the current git checkout
+is treated as a workspace roster too: it came with the clone however it was named.
+
 ## Workspace rosters and trust
 
 A roster inside a repository arrived with the checkout and runs commands, so opening a repository
 must not be enough to run them. It is honoured only after the user approves that exact file:
 `crossreview.py roster` exits 4 and prints the commands and the file's SHA-256, the agent shows
-them to the user, and on a clear yes runs `crossreview.py trust`, which records
+them to the user, and on a clear yes runs `crossreview.py trust` (with `--roster <file>` for one
+named on the command line), which records
 
 ```json
 {"workspace": "/abs/repo", "roster": "/abs/repo/.agents/crossreview.json", "sha256": "...", "approved": "2026-10-03T01:20:00"}

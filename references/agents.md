@@ -7,7 +7,8 @@ explains them. `{bin}` is the detected binary, `{model}` is written into the ros
 
 Rules every template follows, and why:
 
-- **The brief never travels as an argument.** Linux caps one argument at 128 KB (`MAX_ARG_STRLEN`),
+- **The brief never travels as an argument** (Koda is the one exception, see below). Linux caps one
+  argument at 128 KB (`MAX_ARG_STRLEN`),
   Windows a whole command line at 32 767 characters. A 138 KB brief passed as `"$(cat brief)"`
   fails with `Argument list too long` before the model is called (Cursor Agent and Coddy, both
   checked on 2026-10-03). Templates read the brief from stdin or from a file flag.
@@ -159,8 +160,11 @@ kimi --quiet --plan -m {model} < {brief} > {out}
 koda "$(cat {brief})" > {out}
 ```
 
-- Kept from Coddy's original list. The brief is an argument here, so it is limited to 128 KB, and
-  there is no model placeholder: put the CLI's model flag into the stored command by hand.
+- Kept from Coddy's original list, and the one exception to the rule above: Koda takes the prompt
+  only as an argument. The helper refuses it up front, with the reason in the status, when the brief
+  is longer than one argument may be (120 KB here, 30 KB on Windows). There is no model placeholder:
+  put the CLI's model flag into the stored command by hand.
+- No read-only mode is known, so rely on the brief's tool ban and the empty working directory.
 - Unverified.
 
 ## Adding an agent

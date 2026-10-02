@@ -3,9 +3,11 @@
 # script) and the same tab-separated output:
 #   agent <TAB> binary_path <TAB> models_cmd <TAB> run_template
 #
-# The template is the PowerShell column of agents.tsv. An agent that runs
-# commands through PowerShell (Coddy on Windows) cannot use '<' to feed the
-# brief, so those templates pipe it with Get-Content instead. Works on Windows
+# The template is the PowerShell column of agents.tsv: `cmd /d /c --% <the
+# POSIX command>`. PowerShell has no '<', and its own | and > re-encode text
+# (Windows PowerShell 5.1 reads the system code page and writes UTF-16), so the
+# redirection is handed to cmd.exe, which moves the bytes as they are. Koda is
+# the exception: it takes the brief as an argument. Works on Windows
 # PowerShell 5.1 and PowerShell 7.
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -47,7 +49,8 @@ function Invoke-Probe([string]$file, [string[]]$argz, [int]$seconds) {
     }
 }
 
-foreach ($line in Get-Content -LiteralPath $table -Encoding UTF8) {
+foreach ($raw in Get-Content -LiteralPath $table -Encoding UTF8) {
+    $line = $raw.TrimEnd("`r")
     if ($line.Trim() -eq '' -or $line.StartsWith('#')) { continue }
     $cols = $line.Split("`t")
     if ($cols.Length -ne 6) { continue }
