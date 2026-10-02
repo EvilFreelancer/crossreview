@@ -215,7 +215,8 @@ class DetectTest(TempCase):
         self.assertEqual(found["claude"].models_cmd, "")
         self.assertEqual(found["codex"].models_cmd, "codex debug models")
         self.assertEqual(found["cursor"].binary, "cursor-agent")
-        self.assertTrue(found["cursor"].template.startswith("cursor-agent -p --trust"))
+        self.assertTrue(found["cursor"].template.startswith(
+            ("cmd /d /c --% " if IS_WINDOWS else "") + "cursor-agent -p --trust"), found["cursor"].template)
         for d in found.values():
             self.assertNotIn("{bin}", d.template)
             self.assertIn("{brief}", d.template)
@@ -396,7 +397,7 @@ class BriefTest(TempCase):
     def test_uncommitted_work_with_untracked_files(self):
         repo = self.make_repo()
         (repo / "app.py").write_text("def mean(v):\n    return sum(v) / (len(v) - 1)\n")
-        (repo / "notes.md").write_text("Text with a fence:\n```\ncode\n```\nи кириллица\n")
+        (repo / "notes.md").write_text("Text with a fence:\n```\ncode\n```\nи кириллица\n", encoding="utf-8")
         (repo / "blob.bin").write_bytes(b"\0\1\2")
         out = self.tmp / "brief.md"
         rc, stdout, err = self.helper("brief", "--out", out, "--intent", "Fix the mean.", cwd=repo)
