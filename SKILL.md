@@ -1,14 +1,15 @@
 ---
 name: crossreview
 description: >
-  Run when the user invokes /crossreview or asks for a cross-review, a quorum review or a second
-  opinion from other agents or models: fan a code review (uncommitted work, a branch, a commit
-  range, files, a plan or a document) out to several console code agents (Claude Code, Codex,
-  Coddy, Cursor Agent, Devin, OpenCode, Gemini CLI, Qwen Code, Kimi, Koda) that review it in
-  parallel and blind to each other, then, as the orchestrator, verify every finding against the
-  code and decide alone what matters and what to fix. Works from any agent with a shell on Linux,
-  macOS and Windows; the first run detects the installed CLIs, asks which agents and models to use
-  and saves a reviewer roster shared by every agent on the machine.
+  Run when the user invokes /crossreview (or /crossreview:setup to choose the reviewers) or asks
+  for a cross-review, a quorum review or a second opinion from other agents or models: fan a code
+  review (uncommitted work, a branch, a commit range, files, a plan or a document) out to several
+  console code agents (Claude Code, Codex, Coddy, Cursor Agent, Devin, OpenCode, Gemini CLI, Qwen
+  Code, Kimi, Koda) that review it in parallel and blind to each other, then, as the orchestrator,
+  verify every finding against the code and decide alone what matters and what to fix. Works from
+  any agent with a shell on Linux, macOS and Windows; the first run detects the installed CLIs,
+  asks which agents and which of their models to use, and keeps the reviewer roster either for
+  the project (in the agent's folder of the repository) or for all projects (in the agent's home).
 metadata:
   version: 2.0.0
   author: Pavel Rykov <paul@drteam.rocks>
@@ -45,6 +46,14 @@ The helper is `python3 <skill>/scripts/crossreview.py` (`py -3` or `python` on W
 library only, the same on Linux, macOS and Windows; every subcommand has `--help`. Without Python,
 see the last section.
 
+**Who you are.** Every helper command that reads or writes a roster takes `--host <you>`:
+`claude` (Claude Code), `codex`, `coddy`, `cursor`, `opencode`, `devin`, `gemini`, `qwen`, `kimi`,
+or your own name. The rosters are yours, kept where you keep your settings: the global one in your
+home folder (`~/.claude/crossreview.json`, `${CODDY_HOME:-~/.coddy}/crossreview.json`,
+`${CODEX_HOME:-~/.codex}/...`, `~/.cursor/...`), the local one in your folder of the project
+(`.claude/crossreview.json`, `.coddy/...`, `.codex/...`, `.cursor/...`). An agent not on the list
+uses `~/.agents` and `.agents`. Claude Code is recognised without the flag.
+
 **Requirements.** A shell and permission to write files: in a read-only mode (plan, ask) say so
 and stop. Reviewers call their model APIs and write their own session files, so a sandbox that
 blocks the network or writes outside the workspace (Codex's default) has to let the helper's
@@ -58,29 +67,30 @@ the brief directly and do not start another crossreview.
 Coddy ships a built-in coordinator subagent named `crossreview`. It is hidden, so it is not among
 the agents you see listed, but `spawn_agent` accepts it. If you are Coddy, that coordinator is the
 orchestrator: do steps 1 and 2 here, then call `spawn_agent` with `agent: "crossreview"` in the
-foreground and a prompt naming the brief file, the roster file and `<skill>`: the roster is the
-path `crossreview.py roster` printed, or for one-off reviewers a file you write with
-`crossreview.py init --path <tmp>/roster.json agent:model ...`. It runs the CLI reviewers as background tasks and
-its own internal reviewers on any model Coddy is signed into, collects every answer, verifies and
-decides. Its report is the final word: relay it to the user as it is. Only if `spawn_agent` refuses
-the name, do steps 3 to 5 yourself.
+foreground and a prompt naming the brief file, the roster file and `<skill>`. The roster is the
+path `crossreview.py roster --host coddy` printed, or for one-off reviewers a file you write with
+`crossreview.py init --host coddy --path <tmp>/roster.json agent:model ...`. The coordinator runs
+the CLI reviewers as background tasks and its own internal reviewers on any model Coddy is signed
+into, collects every answer, verifies and decides. Its report is the final word: relay it to the
+user as it is. Only if `spawn_agent` refuses the name, do steps 3 to 5 yourself.
 
 ## 1. Reviewers
 
 Reviewers named in the request ("crossreview with cursor auto and coddy on codex/gpt-5.6-sol")
 are a one-off list: pass each as `--reviewer agent:model` in step 3 and leave the roster alone.
 
-Otherwise run `crossreview.py roster` and act on its exit code:
+Otherwise run `crossreview.py roster --host <you>`: it takes your local roster of this project when
+there is one, else your global one, and you act on its exit code:
 
 - **0**: use it. Relay its warnings (a brief passed as an argument breaks past 128 KB) and offer
-  `crossreview.py init --import <path> --refresh` to move the entries to the current templates.
-  A roster of origin `coddy` is Coddy's; the same command makes it the shared one.
-- **4**: the roster came with the workspace (found there, or named with `--roster` inside the
-  repository) and would run the commands it prints. Show them to the user and ask; only after a
-  clear yes run the `crossreview.py trust ...` line it printed. On a no, treat it as absent.
+  `crossreview.py init --host <you> --scope <the same> --import <path> --refresh --force` to move
+  the entries to the current templates.
+- **4**: the local roster is not approved: it may have come with the clone, or it changed since,
+  and it would run the commands it prints. Show them to the user and ask; only after a clear yes run
+  the `crossreview.py trust ...` line it printed. On a no, use `--scope global` from then on.
 - **2**: no roster. Set one up.
 
-Setup (also when the user asks for `/crossreview setup`):
+Setup, also whenever the user invokes `/crossreview:setup`, even if a roster exists:
 
 1. `crossreview.py detect` prints one line per installed reviewer CLI. Offer only those.
 2. Ask which agents to use, multiple choice: with your question tool if you have one, otherwise in
@@ -88,12 +98,16 @@ Setup (also when the user asks for `/crossreview setup`):
 3. For each chosen agent run `crossreview.py models <agent>` and offer the ids it prints
    (multiple choice); when it prints none, ask for the id as free text. Each (agent, model) pair
    is one reviewer.
-4. `crossreview.py init <agent:model>...` writes the roster to
-   `~/.config/crossreview/roster.json` (`%APPDATA%\crossreview\roster.json` on Windows,
-   `$CROSSREVIEW_HOME` moves it). `--min-reviewers N` raises the quorum, `--timeout S` the time
-   each reviewer gets.
-5. `crossreview.py probe` sends every reviewer a one-word brief. Report each failure with the
-   reason it gives (not signed in, usage limit, unknown model) and offer to drop or fix the entry.
+4. Ask where to keep the roster: **local**, for this project only, in your folder of it (commit
+   the file to give the team the same reviewers; each teammate approves it once), or **global**,
+   for all of your projects, in your home folder.
+5. `crossreview.py init --host <you> --scope local|global <agent:model>...` writes it (`--force`
+   over an existing one, `--add` to extend it, `--import <file>` to start from the reviewers
+   another agent already has). `--min-reviewers N` raises the quorum, `--timeout S` the time each
+   reviewer gets. A local roster written this way counts as approved.
+6. `crossreview.py probe --host <you>` sends every reviewer a one-word brief. Report each failure
+   with the reason it gives (not signed in, usage limit, unknown model) and offer to drop or fix
+   the entry.
 
 An internal reviewer is a subagent of a host agent on another model, written
 `internal/<host>:<model>` (`internal/claude:sonnet`, `internal/coddy:devin/swe-2`). Only the host
@@ -123,7 +137,7 @@ crossreview.py brief --out <tmp>/brief.md --intent "<what the change is meant to
 ## 3. Run and collect every answer
 
 ```
-crossreview.py run --brief <tmp>/brief.md [--reviewer agent:model ...] [--host <your agent>]
+crossreview.py run --host <you> --brief <tmp>/brief.md [--reviewer agent:model ...] [--scope global]
 crossreview.py wait <run> --max 240
 ```
 
@@ -139,7 +153,7 @@ When the run has finished, look at every reviewer that did not answer:
   resume command of that CLI in `references/agents.md`;
 - not signed in, out of quota, unknown model: tell the user, it will not answer this time.
 
-`run` marks the internal reviewers that belong to `--host` as `host`: start one read-only subagent
+`run` marks the internal reviewers that belong to you as `host`: start one read-only subagent
 per entry on its model while the CLIs run, with the brief file as its whole prompt, and write each
 answer to the path the status names.
 
@@ -175,7 +189,8 @@ fresh brief, and its reviewers again see nothing of the first round's answers.
 
 - `references/agents.md`: every reviewer CLI, its template, how it is kept read-only, known
   failures, and how to recover an answer from a reviewer that timed out.
-- `references/roster.md`: the roster format, its locations, the workspace trust receipts.
+- `references/roster.md`: the roster format, where each agent keeps it, the approvals of a
+  project's roster.
 - `references/brief.md`: the brief format, for writing one by hand.
 
 ## No Python

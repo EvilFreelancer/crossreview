@@ -371,26 +371,68 @@ def cmd_models(args) -> int:
 
 # ---------------------------------------------------------------- roster
 
+# Where each agent keeps its own settings, the way it keeps its skills and
+# rules: the global roster is crossreview.json in the agent's home, the local
+# one crossreview.json in the agent's folder of the project. An agent that is
+# not listed uses the shared .agents folders.
+HOSTS = {
+    # host: (variable that moves its home, default home, folder in a project)
+    "claude": ("CLAUDE_CONFIG_DIR", "~/.claude", ".claude"),
+    "codex": ("CODEX_HOME", "~/.codex", ".codex"),
+    "coddy": ("CODDY_HOME", "~/.coddy", ".coddy"),
+    "cursor": (None, "~/.cursor", ".cursor"),
+    "opencode": (None, "{config}/opencode", ".opencode"),
+    "devin": (None, "{config}/devin", ".devin"),
+    "gemini": (None, "~/.gemini", ".gemini"),
+    "qwen": (None, "~/.qwen", ".qwen"),
+    "kimi": (None, "~/.kimi", ".kimi"),
+}
+OTHER_HOST = (None, "~/.agents", ".agents")
+HOST_ALIASES = {"claude-code": "claude", "claudecode": "claude", "cursor-agent": "cursor", "agent": "cursor",
+                "codex-cli": "codex", "qwen-code": "qwen", "gemini-cli": "gemini", "kimi-cli": "kimi"}
+ROSTER_FILE = "crossreview.json"
+TRUST_FILE = "crossreview-trust.json"
+SCOPES = ("local", "global")
 
-def config_home() -> Path:
-    env = os.environ.get("CROSSREVIEW_HOME")
-    if env:
-        return Path(env).expanduser()
-    if IS_WINDOWS:
-        return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "crossreview"
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    return (Path(xdg) if xdg else Path.home() / ".config") / "crossreview"
+
+def resolve_host(name: Optional[str] = None, required: bool = True) -> Optional[str]:
+    """The agent that drives the run: --host, else $CROSSREVIEW_HOST, else what
+    the environment gives away (Claude Code sets CLAUDECODE for its commands)."""
+    name = (name or os.environ.get("CROSSREVIEW_HOST") or "").strip().lower()
+    if not name and os.environ.get("CLAUDECODE"):
+        name = "claude"
+    if not name:
+        if not required:
+            return None
+        raise CrossreviewError("say which agent you are with --host (%s, or your own name): the rosters live in "
+                               "your folders" % ", ".join(HOSTS))
+    if not re.match(r"^[a-z0-9][a-z0-9._-]*$", name):
+        raise CrossreviewError("host %r is not a plain agent name" % name)
+    return HOST_ALIASES.get(name, name)
 
 
-def user_roster_path() -> Path:
-    return config_home() / "roster.json"
+def host_home(host: str) -> Path:
+    """The agent's own settings folder; $CROSSREVIEW_HOME stands in for it, for
+    every agent at once."""
+    if os.environ.get("CROSSREVIEW_HOME"):
+        return Path(os.environ["CROSSREVIEW_HOME"]).expanduser()
+    env, default, _ = HOSTS.get(host, OTHER_HOST)
+    if env and os.environ.get(env):
+        return Path(os.environ[env]).expanduser()
+    config = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(default.replace("{config}", config)).expanduser()
 
 
-def legacy_coddy_roster() -> Path:
-    return Path(os.environ.get("CODDY_HOME") or Path.home() / ".coddy").expanduser() / "crossreview.json"
+def global_roster_path(host: str) -> Path:
+    return host_home(host) / ROSTER_FILE
 
 
-WORKSPACE_ROSTERS = (".agents/crossreview.json", ".coddy/crossreview.json")
+def local_roster_path(host: str, workspace: Path) -> Path:
+    return Path(workspace) / HOSTS.get(host, OTHER_HOST)[2] / ROSTER_FILE
+
+
+def trust_path(host: str) -> Path:
+    return host_home(host) / TRUST_FILE
 
 
 def git_toplevel(path: Path) -> Optional[Path]:
@@ -405,6 +447,7 @@ def git_toplevel(path: Path) -> Optional[Path]:
 
 
 def canonical_workspace(path: Path) -> Path:
+    """The project a directory belongs to: its git checkout, else the directory."""
     path = Path(path).expanduser().resolve()
     return git_toplevel(path) or path
 
@@ -418,9 +461,10 @@ class RosterLocation:
     roster all come from the same bytes, so a file swapped between them cannot
     run under an approval given to what it held before."""
 
-    def __init__(self, path: Path, origin: str, workspace: Optional[Path] = None):
+    def __init__(self, path: Path, origin: str, host: Optional[str] = None, workspace: Optional[Path] = None):
         self.path = path
         self.origin = origin
+        self.host = host
         self.workspace = workspace
         self.data = Path(path).read_bytes()
         self.digest = hashlib.sha256(self.data).hexdigest()
@@ -436,50 +480,55 @@ class RosterLocation:
 
     @property
     def needs_approval(self) -> bool:
-        return self.origin == "workspace" and not is_trusted(self.workspace, self.path, self.digest)
+        # A project's roster can arrive with a clone, so it runs only once the
+        # user approved these bytes; the one setup wrote is approved as it is written.
+        return self.origin == "local" and not is_trusted(self.host or "", self.workspace, self.path, self.digest)
 
 
-def _named_roster(path: Path, origin: str, workspace: Optional[str]) -> RosterLocation:
+def _named_roster(path: Path, origin: str, host: Optional[str], workspace: Optional[str]) -> RosterLocation:
     """A roster named on the command line or in the environment. One that lives
-    inside the workspace came with the checkout, whatever named it, and needs the
-    same approval as one found there."""
+    inside the project's checkout came with it, whatever named it, and needs the
+    same approval as the project's own."""
     path = path.resolve()
     ws = git_toplevel(Path(workspace or os.getcwd()).expanduser().resolve())
     if ws is None:
-        # Not a checkout: nothing here arrived with a clone.
-        return RosterLocation(path, origin)
+        return RosterLocation(path, origin, host)
     try:
         path.relative_to(ws.resolve())
     except ValueError:
-        return RosterLocation(path, origin)
-    return RosterLocation(path, "workspace", ws)
+        return RosterLocation(path, origin, host)
+    if host is None:
+        raise CrossreviewError("%s lies inside the project: say which agent you are (--host), whose approvals apply"
+                               % path)
+    return RosterLocation(path, "local", host, ws)
 
 
-def locate_roster(explicit: Optional[str] = None, workspace: Optional[str] = None) -> Optional[RosterLocation]:
+def locate_roster(host: Optional[str], explicit: Optional[str] = None, workspace: Optional[str] = None,
+                  scope: Optional[str] = None) -> Optional[RosterLocation]:
+    """--roster, $CROSSREVIEW_ROSTER, then the host's local roster of this project,
+    then its global one: a project's own set wins over the personal one."""
     if explicit:
         path = Path(explicit).expanduser()
         if not path.is_file():
             raise CrossreviewError("roster %s does not exist" % path)
-        return _named_roster(path, "explicit", workspace)
+        return _named_roster(path, "explicit", host, workspace)
     if os.environ.get("CROSSREVIEW_ROSTER"):
         path = Path(os.environ["CROSSREVIEW_ROSTER"]).expanduser()
         if not path.is_file():
             raise CrossreviewError("CROSSREVIEW_ROSTER names %s, which does not exist" % path)
-        return _named_roster(path, "env", workspace)
-    if user_roster_path().is_file():
-        return RosterLocation(user_roster_path(), "user")
-    if legacy_coddy_roster().is_file():
-        return RosterLocation(legacy_coddy_roster(), "coddy")
+        return _named_roster(path, "env", host, workspace)
+    if host is None:
+        host = resolve_host()
     ws = canonical_workspace(Path(workspace or os.getcwd()))
-    for rel in WORKSPACE_ROSTERS:
-        path = ws / rel
+    if scope in (None, "local"):
+        path = local_roster_path(host, ws)
         if path.is_file():
-            return RosterLocation(path, "workspace", ws)
+            return RosterLocation(path.resolve(), "local", host, ws)
+    if scope in (None, "global"):
+        path = global_roster_path(host)
+        if path.is_file():
+            return RosterLocation(path, "global", host)
     return None
-
-
-def trust_path() -> Path:
-    return config_home() / "trust.json"
 
 
 def _read_json(path: Path, default):
@@ -513,13 +562,23 @@ def _write_json(path: Path, data) -> None:
             time.sleep(0.05)
 
 
-def is_trusted(workspace: Optional[Path], roster: Path, digest: str) -> bool:
-    data = _read_json(trust_path(), {"version": 1, "approvals": []})
+def is_trusted(host: str, workspace: Optional[Path], roster: Path, digest: str) -> bool:
+    data = _read_json(trust_path(host), {"version": 1, "approvals": []})
     for entry in data.get("approvals", []):
         if (entry.get("workspace") == str(workspace) and entry.get("roster") == str(roster)
                 and entry.get("sha256") == digest):
             return True
     return False
+
+
+def record_trust(host: str, workspace: Path, roster: Path, digest: str) -> None:
+    data = _read_json(trust_path(host), {"version": 1, "approvals": []})
+    approvals = [a for a in data.get("approvals", [])
+                 if not (a.get("workspace") == str(workspace) and a.get("roster") == str(roster))]
+    approvals.append({"workspace": str(workspace), "roster": str(roster), "sha256": digest,
+                      "approved": _dt.datetime.now().isoformat(timespec="seconds")})
+    data["approvals"] = approvals
+    _write_json(trust_path(host), data)
 
 
 def load_roster(path: Path) -> dict:
@@ -601,10 +660,8 @@ def entry_warnings(entry: dict, table: Dict[str, AgentSpec]) -> List[str]:
 
 
 def describe_roster(loc: RosterLocation, roster: dict, table: Dict[str, AgentSpec]) -> str:
-    lines = ["roster: %s (%s)" % (loc.path, loc.origin)]
-    if loc.origin == "coddy":
-        lines.append("note: this is Coddy's roster; `crossreview.py init --import %s` copies it to %s, "
-                     "shared by every agent" % (loc.path, user_roster_path()))
+    what = {"local": "local: this project, for %s" % loc.host, "global": "global: every project, for %s" % loc.host}
+    lines = ["roster: %s (%s)" % (loc.path, what.get(loc.origin, loc.origin))]
     lines.append("min_reviewers: %s, timeout: %ss" % (roster.get("min_reviewers", DEFAULT_MIN_REVIEWERS),
                                                       roster.get("timeout", DEFAULT_TIMEOUT)))
     for i, e in enumerate(normalize_entries(roster, loc.origin), 1):
@@ -619,15 +676,19 @@ def describe_roster(loc: RosterLocation, roster: dict, table: Dict[str, AgentSpe
 
 
 def cmd_roster(args) -> int:
-    loc = locate_roster(args.roster, args.workspace)
+    host = resolve_host(args.host, required=not (args.roster or os.environ.get("CROSSREVIEW_ROSTER")))
+    loc = locate_roster(host, args.roster, args.workspace, args.scope)
     if loc is None:
-        print("no roster (looked at $CROSSREVIEW_ROSTER, %s, %s and %s in the workspace)" % (
-            user_roster_path(), legacy_coddy_roster(), " and ".join(WORKSPACE_ROSTERS)))
+        ws = canonical_workspace(Path(args.workspace or os.getcwd()))
+        looked = [str(local_roster_path(host, ws)), str(global_roster_path(host))]
+        if args.scope:
+            looked = looked[:1] if args.scope == "local" else looked[1:]
+        print("no roster for %s (looked at %s)" % (host, " and ".join(looked)))
         return EXIT_NO_ROSTER
     roster = loc.roster()
     table = load_table()
     if args.json:
-        print(json.dumps({"path": str(loc.path), "origin": loc.origin, "sha256": loc.digest,
+        print(json.dumps({"path": str(loc.path), "origin": loc.origin, "host": loc.host, "sha256": loc.digest,
                           "needs_approval": loc.needs_approval,
                           "workspace": str(loc.workspace) if loc.workspace else None,
                           "min_reviewers": roster.get("min_reviewers", DEFAULT_MIN_REVIEWERS),
@@ -635,43 +696,31 @@ def cmd_roster(args) -> int:
     else:
         print(describe_roster(loc, roster, table))
     if loc.needs_approval:
-        print("\nThis roster came with the workspace and runs the commands above. It is used only after "
-              "the user approves this exact file (sha256 %s): show them the commands, and on a yes run "
-              "`crossreview.py trust --workspace %s --roster %s --sha256 %s`." % (
-                  loc.digest, loc.workspace, loc.path, loc.digest))
+        print("\nThis roster belongs to the project, not to you: it may have come with the clone, and it runs the "
+              "commands above. It is used only after the user approves this exact file (sha256 %s): show them the "
+              "commands, and on a yes run `crossreview.py trust --host %s --workspace %s --roster %s --sha256 %s`. "
+              "On a no, use the global roster: --scope global." % (
+                  loc.digest, loc.host, loc.workspace, loc.path, loc.digest))
         return EXIT_NEEDS_APPROVAL
     return EXIT_OK
 
 
 def cmd_trust(args) -> int:
+    host = resolve_host(args.host)
     ws = canonical_workspace(Path(args.workspace or os.getcwd()))
-    if args.roster:
-        path = Path(args.roster).expanduser().resolve()
-        try:
-            path.relative_to(ws.resolve())
-        except ValueError:
-            raise CrossreviewError("%s is not inside the workspace %s; only a workspace roster needs approval" % (path, ws))
-        if not path.is_file():
-            raise CrossreviewError("roster %s does not exist" % path)
-    else:
-        for rel in WORKSPACE_ROSTERS:
-            path = ws / rel
-            if path.is_file():
-                break
-        else:
-            raise CrossreviewError("no workspace roster under %s" % ws)
+    path = (Path(args.roster).expanduser() if args.roster else local_roster_path(host, ws)).resolve()
+    try:
+        path.relative_to(ws.resolve())
+    except ValueError:
+        raise CrossreviewError("%s is not inside the project %s; only a project's roster needs approval" % (path, ws))
+    if not path.is_file():
+        raise CrossreviewError("roster %s does not exist" % path)
     digest = sha256_file(path)
     if args.sha256 and args.sha256.lower() != digest:
         raise CrossreviewError("%s changed since it was shown (sha256 %s, now %s): show it to the user again"
                                % (path, args.sha256, digest))
-    data = _read_json(trust_path(), {"version": 1, "approvals": []})
-    approvals = [a for a in data.get("approvals", [])
-                 if not (a.get("workspace") == str(ws) and a.get("roster") == str(path))]
-    approvals.append({"workspace": str(ws), "roster": str(path), "sha256": digest,
-                      "approved": _dt.datetime.now().isoformat(timespec="seconds")})
-    data["approvals"] = approvals
-    _write_json(trust_path(), data)
-    print("approved %s (sha256 %s); a change to the file needs a new approval" % (path, digest))
+    record_trust(host, ws, path, digest)
+    print("approved %s for %s (sha256 %s); a change to the file needs a new approval" % (path, host, digest))
     return EXIT_OK
 
 
@@ -751,37 +800,54 @@ def refresh_entries(entries: List[dict], table: Dict[str, AgentSpec]) -> List[di
 
 
 def cmd_init(args) -> int:
-    target = Path(args.path).expanduser() if args.path else user_roster_path()
+    host = resolve_host(args.host)
+    ws = canonical_workspace(Path(args.workspace or os.getcwd()))
+    if args.path:
+        target = Path(args.path).expanduser()
+    elif args.scope == "local":
+        target = local_roster_path(host, ws)
+    elif args.scope == "global":
+        target = global_roster_path(host)
+    else:
+        raise CrossreviewError("say where the roster goes: --scope local (%s) or --scope global (%s)"
+                               % (local_roster_path(host, ws), global_roster_path(host)))
     if args.import_path:
-        source = Path(args.import_path).expanduser()
-        roster = load_roster(source)
+        roster = load_roster(Path(args.import_path).expanduser())
         for e in roster.get("reviewers", []):
-            # In the shared roster an internal reviewer names its host; Coddy wrote the first ones.
+            # Coddy wrote the first rosters, and its internal reviewers are its own subagents.
             if isinstance(e, dict) and e.get("kind") == "internal" and not e.get("host"):
                 e["host"] = "coddy"
         if args.refresh:
             roster["reviewers"] = refresh_entries(roster.get("reviewers", []), load_table())
-        if args.add and target.is_file():
-            old = load_roster(target)
-            old["reviewers"] = old.get("reviewers", []) + roster.get("reviewers", [])
-            roster = old
+        entries = roster.get("reviewers", [])
     else:
         if not args.reviewers:
-            raise CrossreviewError("name the reviewers, e.g. `init cursor:auto coddy:codex/gpt-5.6-sol`")
+            raise CrossreviewError("name the reviewers, e.g. `init --scope global cursor:auto coddy:codex/gpt-5.6-sol`")
         entries = build_entries(args.reviewers, load_table())
-        roster = {"version": 1, "min_reviewers": args.min_reviewers, "timeout": args.timeout,
-                  "reviewers": entries}
-        if args.add and target.is_file():
-            old = load_roster(target)
-            old["reviewers"] = old.get("reviewers", []) + entries
-            roster = old
+        roster = {"version": 1, "min_reviewers": args.min_reviewers, "timeout": args.timeout, "reviewers": entries}
     if target.is_file() and not (args.force or args.add):
         raise CrossreviewError("%s already exists; pass --add to append or --force to replace it" % target)
+    if args.add and target.is_file():
+        old = load_roster(target)
+        old["reviewers"] = old.get("reviewers", []) + entries
+        roster = old
     _write_json(target, roster)
-    loc = RosterLocation(target.resolve(), "user" if target == user_roster_path() else "explicit")
+    resolved = target.resolve()
+    try:
+        resolved.relative_to(ws)
+        inside = True
+    except ValueError:
+        inside = False
+    if inside:
+        # A roster in the project: the user asked for this file to be written,
+        # so it is approved as it stands.
+        loc = RosterLocation(resolved, "local", host, ws)
+        record_trust(host, ws, resolved, loc.digest)
+    else:
+        loc = RosterLocation(resolved, "global" if resolved == global_roster_path(host).resolve() else "explicit", host)
     print(describe_roster(loc, roster, load_table()))
-    print("\nwritten. Check that every reviewer answers: crossreview.py probe%s" % (
-        "" if target == user_roster_path() else " --roster %s" % target))
+    print("\nwritten. Check that every reviewer answers: crossreview.py probe --host %s%s" % (
+        host, "" if loc.origin in ("local", "global") else " --roster %s" % target))
     return EXIT_OK
 
 
@@ -1109,9 +1175,11 @@ def select_entries(args) -> Tuple[List[dict], int, int, str]:
     if args.reviewer:
         entries = normalize_entries({"reviewers": build_entries(args.reviewer, load_table())})
         return entries, min(DEFAULT_MIN_REVIEWERS, len(entries)), DEFAULT_TIMEOUT, "command line"
-    loc = locate_roster(args.roster, args.workspace)
+    host = resolve_host(args.host, required=not (args.roster or os.environ.get("CROSSREVIEW_ROSTER")))
+    loc = locate_roster(host, args.roster, args.workspace, args.scope)
     if loc is None:
-        raise CrossreviewError("no roster: run setup (detect, then init) or name reviewers with --reviewer")
+        raise CrossreviewError("no roster for %s: run /crossreview:setup (detect, then init) or name reviewers with "
+                               "--reviewer" % host)
     if loc.needs_approval:
         raise CrossreviewError("the workspace roster %s is not approved; see `crossreview.py roster`" % loc.path)
     roster = loc.roster()
@@ -1410,7 +1478,8 @@ def cmd_run(args) -> int:
     entries, min_reviewers, timeout, source = select_entries(args)
     run_dir = new_run_dir(args.run_dir)
     plan = prepare_run(entries, brief, run_dir, args.cwd, args.timeout or timeout,
-                       args.min_reviewers or min_reviewers, source, args.host, args.only, args.parallel)
+                       args.min_reviewers or min_reviewers, source, resolve_host(args.host, required=False),
+                       args.only, args.parallel)
     print("run: %s" % run_dir)
     print("reviewers from %s; working directory %s; paths below are relative to the run" % (source, plan["cwd"]))
     for r in plan["reviewers"]:
@@ -1686,10 +1755,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--binary", help="the binary to ask (default: the first one installed)")
     s.set_defaults(func=cmd_models)
 
+    def host_arg(s):
+        s.add_argument("--host", help="the agent you are: %s, or your own name (default: $CROSSREVIEW_HOST)"
+                                      % ", ".join(HOSTS))
+
     def roster_args(s):
-        s.add_argument("--roster", help="roster file (default: $CROSSREVIEW_ROSTER, the user roster, "
-                                        "Coddy's roster, then the workspace's)")
-        s.add_argument("--workspace", help="workspace for a workspace roster (default: the current directory)")
+        host_arg(s)
+        s.add_argument("--roster", help="roster file (default: $CROSSREVIEW_ROSTER, then your local roster of this "
+                                        "project, then your global one)")
+        s.add_argument("--scope", choices=SCOPES, help="only the local or only the global roster")
+        s.add_argument("--workspace", help="the project (default: the current directory)")
 
     s = sub.add_parser("roster", help="show the roster and whether it can be used")
     roster_args(s)
@@ -1697,21 +1772,25 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_roster)
 
     s = sub.add_parser("init", help="write the roster")
+    host_arg(s)
+    s.add_argument("--scope", choices=SCOPES, help="local: your folder of this project; global: your home folder")
+    s.add_argument("--workspace", help="the project (default: the current directory)")
     s.add_argument("reviewers", nargs="*", metavar="SPEC",
                    help="agent:model (coddy:codex/gpt-5.6-sol), or internal/<host>:<model>")
     s.add_argument("--import", dest="import_path", metavar="FILE", help="copy an existing roster (Coddy's) instead")
     s.add_argument("--refresh", action="store_true",
                    help="with --import: rewrite the CLI entries with the current templates")
-    s.add_argument("--path", help="write here instead of the user roster")
+    s.add_argument("--path", help="write exactly this file instead")
     s.add_argument("--min-reviewers", type=int, default=DEFAULT_MIN_REVIEWERS)
     s.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="seconds per reviewer")
     s.add_argument("--add", action="store_true", help="append to an existing roster")
     s.add_argument("--force", action="store_true", help="replace an existing roster")
     s.set_defaults(func=cmd_init)
 
-    s = sub.add_parser("trust", help="approve the workspace roster (only after the user agreed)")
+    s = sub.add_parser("trust", help="approve the project's roster (only after the user agreed)")
+    host_arg(s)
     s.add_argument("--workspace")
-    s.add_argument("--roster", help="the roster file inside the workspace (default: .agents/crossreview.json)")
+    s.add_argument("--roster", help="the roster file inside the project (default: your local roster)")
     s.add_argument("--sha256", help="the digest `roster` printed: refuse when the file no longer has it")
     s.set_defaults(func=cmd_trust)
 
@@ -1753,7 +1832,6 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--timeout", type=int, help="seconds per reviewer (default: the roster's, else 2700)")
     s.add_argument("--min-reviewers", type=int)
     s.add_argument("--parallel", type=int, default=0, help="at most N reviewers at once (default: all)")
-    s.add_argument("--host", help="the agent driving the run (claude, coddy, ...): marks its internal reviewers")
     s.add_argument("--foreground", action="store_true", help="wait here instead of in the background")
     s.set_defaults(func=cmd_run)
 

@@ -99,13 +99,16 @@ Ask your agent in plain words, or with the slash command:
 /crossreview
 /crossreview the branch against main
 /crossreview docs/plan.md with cursor auto and coddy on codex/gpt-5.6-sol
-/crossreview setup
+/crossreview:setup
 ```
 
 The first run detects the installed reviewer CLIs, asks which agents and which of their models to use,
-smoke-tests each one with a one-word brief and saves the roster to `~/.config/crossreview/roster.json`
-(`%APPDATA%\crossreview\roster.json` on Windows). Every agent on the machine shares that roster, so you
-set it up once. Reviewers named in the request are used once, without touching the roster.
+and whether to keep that roster for this project or for all of your projects. A local roster goes into
+the agent's folder of the repository (`.claude/crossreview.json`, `.cursor/crossreview.json`, ...) and can
+be committed for the team; a global one into the agent's home (`~/.claude/crossreview.json`,
+`~/.coddy/crossreview.json`, ...). Then it smoke-tests every reviewer with a one-word brief.
+`/crossreview:setup` runs the same questions again to change it, and reviewers named in the request are
+used once, without touching any roster.
 
 The agent reports a verdict, who answered, the findings it confirmed and decided to fix, the ones not
 worth fixing, the ones it rejected with the evidence, and whether the quorum was met.
@@ -139,10 +142,10 @@ drives it; you can too:
 ```bash
 python3 scripts/crossreview.py detect                      # installed reviewer CLIs
 python3 scripts/crossreview.py models cursor               # the models one of them offers
-python3 scripts/crossreview.py init cursor:auto coddy:codex/gpt-5.6-sol devin:swe-2-high
-python3 scripts/crossreview.py probe                       # does every reviewer answer?
+python3 scripts/crossreview.py init --host claude --scope global cursor:auto coddy:codex/gpt-5.6-sol
+python3 scripts/crossreview.py probe --host claude         # does every reviewer answer?
 python3 scripts/crossreview.py brief --out /tmp/brief.md --base main --intent "What the branch is for"
-python3 scripts/crossreview.py run --brief /tmp/brief.md   # starts them all in the background
+python3 scripts/crossreview.py run --host claude --brief /tmp/brief.md   # all of them, in the background
 python3 scripts/crossreview.py wait <run> --max 240        # exit 3 while still running
 python3 scripts/crossreview.py collect <run>               # every review, every failure reason
 python3 scripts/crossreview.py retry <run> devin-swe-2-high --timeout 3600
@@ -154,9 +157,9 @@ not signed in, usage limit, unknown model, context too long), a timeout and a mi
 
 ## Safety
 
-- The roster is executable configuration. The user roster is yours. A roster that arrives inside a
-  repository (`.agents/crossreview.json`) runs only after you approve that exact file, and any change
-  to it asks again;
+- The roster is executable configuration. The global one is yours. A project's roster that you did not
+  write with setup (a teammate's, one that came with a clone) runs only after you approve that exact
+  file, and any change to it asks again;
 - Reviewers get read-only modes, a brief that forbids tools, and an empty working directory, so even a
   CLI that auto-approves everything in print mode has nothing of yours to touch;
 - A reviewer that has the skill installed itself will not start a crossreview of its own: the helper

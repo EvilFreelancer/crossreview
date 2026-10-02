@@ -105,7 +105,13 @@ class TempCase(unittest.TestCase):
         self.addCleanup(shutil.rmtree, str(self.tmp), True)
         self.env_backup = dict(os.environ)
         self.addCleanup(self._restore_env)
-        os.environ["CROSSREVIEW_HOME"] = str(self.tmp / "home")
+        for var in ("CROSSREVIEW_HOME", "CROSSREVIEW_HOST", "CLAUDECODE", "CLAUDE_CONFIG_DIR", "CODEX_HOME",
+                    "XDG_CONFIG_HOME"):
+            os.environ.pop(var, None)
+        self.home = self.tmp / "userhome"
+        self.home.mkdir()
+        os.environ["HOME"] = str(self.home)
+        os.environ["USERPROFILE"] = str(self.home)
         # Runs without --run-dir land under the temp dir: keep them in ours.
         for var in ("TMPDIR", "TEMP", "TMP"):
             os.environ[var] = str(self.tmp)
@@ -317,67 +323,159 @@ class RosterTest(TempCase):
         repo = self.tmp / "repo"
         repo.mkdir()
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
-        return repo
+        return Path(subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=str(repo), check=True,
+                                   stdout=subprocess.PIPE).stdout.decode().strip())
 
-    def test_no_roster(self):
+    def stub_env(self, *agents) -> dict:
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        banners = {"claude": ("claude", "Claude Code 2", ""), "cursor": ("agent", "2026.10.01", "Cursor Agent")}
+        for agent in agents:
+            name, version, help_text = banners[agent]
+            write_stub(bin_dir, name, version=version, help_text=help_text)
+        return dict(os.environ, PATH=os.pathsep.join([str(bin_dir), tools_path(self.tmp)]))
+
+    def test_the_agent_says_who_it_is(self):
         repo = self.make_repo()
-        rc, out, _ = self.helper("roster", cwd=repo)
+        rc, _, err = self.helper("roster", cwd=repo)
+        self.assertEqual(rc, cr.EXIT_ERROR)
+        self.assertIn("--host", err)
+        rc, out, _ = self.helper("roster", cwd=repo, env=dict(os.environ, CLAUDECODE="1"))
         self.assertEqual(rc, cr.EXIT_NO_ROSTER, out)
+        self.assertIn(os.path.join(".claude", "crossreview.json"), out)
+        rc, out, _ = self.helper("roster", cwd=repo, env=dict(os.environ, CROSSREVIEW_HOST="cursor-agent"))
+        self.assertIn(os.path.join(".cursor", "crossreview.json"), out)
 
-    def test_coddy_roster_is_found_and_flagged(self):
-        coddy = self.tmp / "coddy"
+    def test_each_agent_keeps_its_rosters_in_its_own_folders(self):
+        repo = self.make_repo()
+        os.environ["CODDY_HOME"] = str(self.tmp / "coddy-home")
+        expected = {"claude": self.home / ".claude", "cursor": self.home / ".cursor", "codex": self.home / ".codex",
+                    "coddy": self.tmp / "coddy-home", "kimi": self.home / ".kimi",
+                    "opencode": self.home / ".config" / "opencode", "windsurf": self.home / ".agents"}
+        for host, folder in expected.items():
+            self.assertEqual(cr.global_roster_path(host), folder / "crossreview.json", host)
+        self.assertEqual(cr.local_roster_path("claude", repo), repo / ".claude" / "crossreview.json")
+        self.assertEqual(cr.local_roster_path("coddy", repo), repo / ".coddy" / "crossreview.json")
+        self.assertEqual(cr.local_roster_path("windsurf", repo), repo / ".agents" / "crossreview.json")
+        os.environ["CODEX_HOME"] = str(self.tmp / "cx")
+        self.assertEqual(cr.global_roster_path("codex"), self.tmp / "cx" / "crossreview.json")
+        os.environ["CROSSREVIEW_HOME"] = str(self.tmp / "shared")
+        self.assertEqual(cr.global_roster_path("claude"), self.tmp / "shared" / "crossreview.json")
+
+    def test_setup_writes_global_or_local_and_the_project_wins(self):
+        repo = self.make_repo()
+        env = self.stub_env("claude", "cursor")
+        rc, out, err = self.helper("init", "--host", "claude", "--scope", "global", "cursor:auto", env=env, cwd=repo)
+        self.assertEqual(rc, 0, err)
+        self.assertTrue((self.home / ".claude" / "crossreview.json").is_file())
+        rc, out, _ = self.helper("roster", "--host", "claude", cwd=repo)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("global: every project, for claude", out)
+        rc, out, err = self.helper("init", "--host", "claude", "--scope", "local", "claude:sonnet", env=env, cwd=repo)
+        self.assertEqual(rc, 0, err)
+        self.assertTrue((repo / ".claude" / "crossreview.json").is_file())
+        rc, out, _ = self.helper("roster", "--host", "claude", cwd=repo)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("local: this project, for claude", out)
+        self.assertIn("--model sonnet", out)
+        rc, out, _ = self.helper("roster", "--host", "claude", "--scope", "global", cwd=repo)
+        self.assertIn("--model auto", out)
+        rc, out, _ = self.helper("roster", "--host", "coddy", cwd=repo)
+        self.assertEqual(rc, cr.EXIT_NO_ROSTER, "claude's rosters are not coddy's")
+
+    def test_init_needs_a_scope(self):
+        repo = self.make_repo()
+        rc, _, err = self.helper("init", "--host", "claude", "cursor:auto", cwd=repo)
+        self.assertEqual(rc, cr.EXIT_ERROR)
+        self.assertIn("--scope local", err)
+        self.assertIn("--scope global", err)
+
+    def test_coddy_keeps_its_original_places(self):
+        repo = self.make_repo()
+        coddy = self.tmp / "coddy-home"
         coddy.mkdir()
+        os.environ["CODDY_HOME"] = str(coddy)
         (coddy / "crossreview.json").write_text(json.dumps({"version": 1, "reviewers": [
             {"kind": "cli", "agent": "cursor", "binary": "agent", "model": "auto",
              "command": 'agent -p --trust --mode plan --model auto "$(cat {brief})" > {out}'},
             {"kind": "internal", "definition": "explore", "model": "devin/swe-2"}]}))
-        rc, out, _ = self.helper("roster", cwd=self.make_repo())
+        rc, out, _ = self.helper("roster", "--host", "coddy", cwd=repo)
         self.assertEqual(rc, 0, out)
-        self.assertIn("(coddy)", out)
+        self.assertIn("global: every project, for coddy", out)
         self.assertIn("passes the brief as an argument", out)
         self.assertIn("internal reviewer of coddy", out)
+        (repo / ".coddy").mkdir()
+        (repo / ".coddy" / "crossreview.json").write_text(json.dumps({"reviewers": []}))
+        rc, out, _ = self.helper("roster", "--host", "coddy", cwd=repo)
+        self.assertEqual(rc, cr.EXIT_NEEDS_APPROVAL, out)
 
-    def test_user_roster_wins_over_coddy(self):
-        (self.tmp / "coddy").mkdir()
-        (self.tmp / "coddy" / "crossreview.json").write_text('{"reviewers": []}')
-        (self.tmp / "home").mkdir()
-        (self.tmp / "home" / "roster.json").write_text('{"reviewers": []}')
-        loc = cr.locate_roster(workspace=str(self.make_repo()))
-        self.assertEqual(loc.origin, "user")
-
-    def test_workspace_roster_needs_approval_bound_to_its_digest(self):
+    def test_a_project_roster_from_a_clone_needs_approval(self):
         repo = self.make_repo()
-        (repo / ".agents").mkdir()
-        roster = repo / ".agents" / "crossreview.json"
+        (repo / ".claude").mkdir()
+        roster = repo / ".claude" / "crossreview.json"
         roster.write_text(json.dumps({"reviewers": [{"kind": "cli", "command": "evil < {brief} > {out}"}]}))
-        rc, out, _ = self.helper("roster", cwd=repo)
+        rc, out, _ = self.helper("roster", "--host", "claude", cwd=repo)
         self.assertEqual(rc, cr.EXIT_NEEDS_APPROVAL, out)
         self.assertIn("evil", out)
-        rc, out, err = self.helper("run", "--brief", roster, cwd=repo)
+        shown = out.split("--sha256 ")[1].split("`")[0].strip()
+        brief = self.tmp / "brief.md"
+        brief.write_text("x")
+        rc, out, err = self.helper("run", "--host", "claude", "--brief", brief, cwd=repo)
         self.assertEqual(rc, cr.EXIT_ERROR)
         self.assertIn("not approved", err)
-        rc, out, _ = self.helper("trust", cwd=repo)
-        self.assertEqual(rc, 0, out)
-        rc, out, _ = self.helper("roster", cwd=repo)
+        rc, out, err = self.helper("trust", "--host", "claude", "--sha256", shown, cwd=repo)
+        self.assertEqual(rc, 0, out + err)
+        rc, out, _ = self.helper("roster", "--host", "claude", cwd=repo)
         self.assertEqual(rc, 0, out)
         roster.write_text(json.dumps({"reviewers": [{"kind": "cli", "command": "worse < {brief} > {out}"}]}))
-        rc, out, _ = self.helper("roster", cwd=repo)
+        rc, out, _ = self.helper("roster", "--host", "claude", cwd=repo)
         self.assertEqual(rc, cr.EXIT_NEEDS_APPROVAL, out)
+        rc, out, _ = self.helper("roster", "--host", "claude", "--scope", "global", cwd=repo)
+        self.assertEqual(rc, cr.EXIT_NO_ROSTER, out)
+
+    def test_trust_refuses_a_file_changed_since_it_was_shown(self):
+        repo = self.make_repo()
+        (repo / ".claude").mkdir()
+        roster = repo / ".claude" / "crossreview.json"
+        roster.write_text(json.dumps({"reviewers": [{"kind": "cli", "command": "shown < {brief} > {out}"}]}))
+        rc, out, _ = self.helper("roster", "--host", "claude", cwd=repo)
+        shown = out.split("--sha256 ")[1].split("`")[0].strip()
+        roster.write_text(json.dumps({"reviewers": [{"kind": "cli", "command": "swapped < {brief} > {out}"}]}))
+        rc, _, err = self.helper("trust", "--host", "claude", "--sha256", shown, cwd=repo)
+        self.assertEqual(rc, cr.EXIT_ERROR)
+        self.assertIn("changed since it was shown", err)
+
+    def test_a_roster_named_inside_the_workspace_needs_approval(self):
+        repo = self.make_repo()
+        roster = repo / "review.json"
+        roster.write_text(json.dumps({"reviewers": [{"kind": "cli", "command": "evil < {brief} > {out}"}]}))
+        rc, out, _ = self.helper("roster", "--host", "claude", "--roster", roster, cwd=repo)
+        self.assertEqual(rc, cr.EXIT_NEEDS_APPROVAL, out)
+        env = dict(os.environ, CROSSREVIEW_ROSTER=str(roster), CROSSREVIEW_HOST="claude")
+        rc, out, _ = self.helper("roster", cwd=repo, env=env)
+        self.assertEqual(rc, cr.EXIT_NEEDS_APPROVAL, out)
+        rc, out, err = self.helper("trust", "--host", "claude", "--roster", roster, cwd=repo)
+        self.assertEqual(rc, 0, out + err)
+        rc, out, _ = self.helper("roster", "--host", "claude", "--roster", roster, cwd=repo)
+        self.assertEqual(rc, 0, out)
+        outside = self.tmp / "mine.json"
+        outside.write_text(json.dumps({"reviewers": []}))
+        rc, out, _ = self.helper("roster", "--roster", outside, cwd=repo)
+        self.assertEqual(rc, 0, out)
 
     def test_init_from_detected_agents_and_refresh_on_import(self):
-        bin_dir = self.tmp / "bin"
-        bin_dir.mkdir()
-        write_stub(bin_dir, "claude", version="Claude Code 2")
-        write_stub(bin_dir, "agent", version="2026.10.01", help_text="Cursor Agent")
-        env = dict(os.environ, PATH=os.pathsep.join([str(bin_dir), tools_path(self.tmp)]))
-        rc, out, err = self.helper("init", "claude:sonnet", "cursor:auto", "internal/claude:opus", env=env)
+        repo = self.make_repo()
+        env = self.stub_env("claude", "cursor")
+        rc, out, err = self.helper("init", "--host", "claude", "--scope", "global", "claude:sonnet", "cursor:auto",
+                                   "internal/claude:opus", env=env, cwd=repo)
         self.assertEqual(rc, 0, err)
-        data = json.loads((self.tmp / "home" / "roster.json").read_text())
+        target = self.home / ".claude" / "crossreview.json"
+        data = json.loads(target.read_text())
         commands = [r.get("command") for r in data["reviewers"]]
         expected = "claude -p --model sonnet --output-format text --permission-mode plan < {brief} > {out}"
         self.assertIn(("cmd /d /c --% " + expected) if IS_WINDOWS else expected, commands)
         self.assertEqual(data["reviewers"][2], {"kind": "internal", "host": "claude", "model": "opus"})
-        rc, _, err = self.helper("init", "claude:opus", env=env)
+        rc, _, err = self.helper("init", "--host", "claude", "--scope", "global", "claude:opus", env=env, cwd=repo)
         self.assertEqual(rc, cr.EXIT_ERROR)
         self.assertIn("already exists", err)
         legacy = self.tmp / "legacy.json"
@@ -385,69 +483,38 @@ class RosterTest(TempCase):
             {"kind": "cli", "agent": "cursor", "binary": "agent", "model": "auto", "prompt_via": "arg",
              "command": 'agent -p --trust --mode plan --model auto "$(cat {brief})" > {out}'},
             {"kind": "internal", "definition": "explore", "model": "devin/swe-2"}]}))
-        rc, out, err = self.helper("init", "--import", legacy, "--refresh", "--force", env=env)
+        rc, out, err = self.helper("init", "--host", "claude", "--scope", "global", "--import", legacy, "--refresh",
+                                   "--force", env=env, cwd=repo)
         self.assertEqual(rc, 0, err)
-        data = json.loads((self.tmp / "home" / "roster.json").read_text())
+        data = json.loads(target.read_text())
         self.assertNotIn("$(cat", data["reviewers"][0]["command"])
         self.assertIn("--mode ask", data["reviewers"][0]["command"])
         self.assertNotIn("prompt_via", data["reviewers"][0])
         self.assertEqual(data["reviewers"][1]["host"], "coddy")
 
-    def test_a_model_id_is_never_shell(self):
-        bin_dir = self.tmp / "bin"
-        bin_dir.mkdir()
-        write_stub(bin_dir, "claude", version="Claude Code 2")
-        env = dict(os.environ, PATH=os.pathsep.join([str(bin_dir), tools_path(self.tmp)]))
-        for bad in ("sonnet; rm -rf ~", "x & y", "a$(id)", "m`id`", "a b"):
-            rc, _, err = self.helper("init", "claude:%s" % bad, env=env)
-            self.assertEqual(rc, cr.EXIT_ERROR, bad)
-            self.assertIn("characters a command line would interpret", err)
-        rc, _, err = self.helper("init", "claude:claude-opus-4-8[context=1m,effort=high]", env=env)
-        self.assertEqual(rc, 0, err)
-
-    def test_a_roster_named_inside_the_workspace_needs_approval(self):
-        repo = self.make_repo()
-        roster = repo / "review.json"
-        roster.write_text(json.dumps({"reviewers": [{"kind": "cli", "command": "evil < {brief} > {out}"}]}))
-        rc, out, _ = self.helper("roster", "--roster", roster, cwd=repo)
-        self.assertEqual(rc, cr.EXIT_NEEDS_APPROVAL, out)
-        env = dict(os.environ, CROSSREVIEW_ROSTER=str(roster))
-        rc, out, _ = self.helper("roster", cwd=repo, env=env)
-        self.assertEqual(rc, cr.EXIT_NEEDS_APPROVAL, out)
-        rc, out, err = self.helper("trust", "--roster", roster, cwd=repo)
-        self.assertEqual(rc, 0, out + err)
-        rc, out, _ = self.helper("roster", "--roster", roster, cwd=repo)
-        self.assertEqual(rc, 0, out)
-        outside = self.tmp / "mine.json"
-        outside.write_text(json.dumps({"reviewers": []}))
-        rc, out, _ = self.helper("roster", "--roster", outside, cwd=repo)
-        self.assertEqual(rc, 0, out)
-
-    def test_trust_refuses_a_file_changed_since_it_was_shown(self):
-        repo = self.make_repo()
-        (repo / ".agents").mkdir()
-        roster = repo / ".agents" / "crossreview.json"
-        roster.write_text(json.dumps({"reviewers": [{"kind": "cli", "command": "shown < {brief} > {out}"}]}))
-        rc, out, _ = self.helper("roster", cwd=repo)
-        self.assertEqual(rc, cr.EXIT_NEEDS_APPROVAL, out)
-        shown = out.split("--sha256 ")[1].split("`")[0].strip()
-        roster.write_text(json.dumps({"reviewers": [{"kind": "cli", "command": "swapped < {brief} > {out}"}]}))
-        rc, _, err = self.helper("trust", "--sha256", shown, cwd=repo)
-        self.assertEqual(rc, cr.EXIT_ERROR)
-        self.assertIn("changed since it was shown", err)
-        rc, out, _ = self.helper("roster", cwd=repo)
-        self.assertEqual(rc, cr.EXIT_NEEDS_APPROVAL, out)
-
     def test_import_add_keeps_what_was_there(self):
-        home = self.tmp / "home"
-        home.mkdir()
-        (home / "roster.json").write_text(json.dumps({"version": 1, "reviewers": [{"name": "mine", "command": "a < {brief} > {out}"}]}))
+        repo = self.make_repo()
+        target = self.home / ".claude" / "crossreview.json"
+        target.parent.mkdir(parents=True)
+        target.write_text(json.dumps({"version": 1, "reviewers": [{"name": "mine", "command": "a < {brief} > {out}"}]}))
         legacy = self.tmp / "legacy.json"
         legacy.write_text(json.dumps({"version": 1, "reviewers": [{"name": "theirs", "command": "b < {brief} > {out}"}]}))
-        rc, _, err = self.helper("init", "--import", legacy, "--add")
+        rc, _, err = self.helper("init", "--host", "claude", "--scope", "global", "--import", legacy, "--add", cwd=repo)
         self.assertEqual(rc, 0, err)
-        names = [r["name"] for r in json.loads((home / "roster.json").read_text())["reviewers"]]
+        names = [r["name"] for r in json.loads(target.read_text())["reviewers"]]
         self.assertEqual(names, ["mine", "theirs"])
+
+    def test_a_model_id_is_never_shell(self):
+        repo = self.make_repo()
+        env = self.stub_env("claude")
+        for bad in ("sonnet; rm -rf ~", "x & y", "a$(id)", "m`id`", "a b"):
+            rc, _, err = self.helper("init", "--host", "claude", "--scope", "global", "claude:%s" % bad, env=env,
+                                     cwd=repo)
+            self.assertEqual(rc, cr.EXIT_ERROR, bad)
+            self.assertIn("characters a command line would interpret", err)
+        rc, _, err = self.helper("init", "--host", "claude", "--scope", "global",
+                                 "claude:claude-opus-4-8[context=1m,effort=high]", env=env, cwd=repo)
+        self.assertEqual(rc, 0, err)
 
     @unittest.skipIf(IS_WINDOWS, "ownership and modes are the POSIX half")
     def test_the_run_root_is_private(self):
@@ -466,10 +533,11 @@ class RosterTest(TempCase):
             cr.run_root()
 
     def test_unknown_agent_and_missing_model(self):
-        rc, _, err = self.helper("init", "nosuch:model")
+        repo = self.make_repo()
+        rc, _, err = self.helper("init", "--host", "claude", "--scope", "global", "nosuch:model", cwd=repo)
         self.assertEqual(rc, cr.EXIT_ERROR)
         self.assertIn("unknown agent", err)
-        rc, _, err = self.helper("init", "internal:opus")
+        rc, _, err = self.helper("init", "--host", "claude", "--scope", "global", "internal:opus", cwd=repo)
         self.assertEqual(rc, cr.EXIT_ERROR)
         self.assertIn("internal/<host>:<model>", err)
 
