@@ -712,7 +712,7 @@ class RunTest(TempCase):
         rc, out, status, run_dir = self.run_and_wait(roster)
         r = status["reviewers"][0]
         self.assertEqual(r["name"], "evil")
-        self.assertEqual(Path(r["out"]).parent, run_dir / "reviews")
+        self.assertEqual(Path(r["out"]).parent.resolve(), (run_dir / "reviews").resolve())
         self.assertEqual(Path(r["out"]).read_text().strip(), "m1")
 
     def test_a_reviewer_cannot_start_another_crossreview(self):
