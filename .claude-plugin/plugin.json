@@ -1,0 +1,27 @@
+{
+  "name": "crossreview",
+  "description": "Cross-review code with several console code agents at once: Claude Code, Codex, Coddy, Cursor Agent, Devin, OpenCode and others review the same brief in parallel and blind to each other, then the orchestrating agent verifies every finding against the code and decides alone what matters and what to fix. Linux, macOS and Windows; one reviewer roster shared by every agent on the machine.",
+  "version": "2.0.0",
+  "author": {
+    "name": "Pavel Rykov",
+    "email": "paul@drteam.rocks",
+    "url": "https://t.me/evilfreelancer"
+  },
+  "homepage": "https://github.com/EvilFreelancer/crossreview",
+  "repository": "https://github.com/EvilFreelancer/crossreview",
+  "license": "MIT",
+  "keywords": [
+    "code-review",
+    "cross-review",
+    "quorum",
+    "multi-agent",
+    "second-opinion",
+    "claude-code",
+    "codex",
+    "cursor",
+    "coddy",
+    "devin",
+    "opencode",
+    "agent-skill"
+  ]
+}

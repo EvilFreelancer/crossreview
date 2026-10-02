@@ -1,0 +1,58 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.x"]
+        include:
+          - os: ubuntu-latest
+            python: "3.9"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit tests (helper, detection twins, run supervisor)
+        run: python -m unittest discover -s tests -v
+      - name: Which shells and PowerShells the tests saw
+        shell: bash
+        run: |
+          ls -l /bin/sh || true
+          command -v pwsh powershell timeout gtimeout || true
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck -s sh scripts/detect-agents.sh
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          $issues = Invoke-ScriptAnalyzer -Path scripts/detect-agents.ps1 -Severity Error,Warning
+          $issues | Format-Table -AutoSize
+          if ($issues | Where-Object Severity -eq 'Error') { exit 1 }
+      - name: manifests agree on name, version and description
+        run: |
+          python3 - <<'PY'
+          import json, re
+          docs = {p: json.load(open(p)) for p in (".claude-plugin/plugin.json", ".codex-plugin/plugin.json",
+                                                  ".cursor-plugin/plugin.json")}
+          front = open("SKILL.md").read().split("---")[1]
+          version = re.search(r"^\s+version:\s*(\S+)", front, re.M).group(1)
+          assert {d["version"] for d in docs.values()} == {version}, (version, docs)
+          assert {d["name"] for d in docs.values()} == {"crossreview"}
+          assert len({d["description"] for d in docs.values()}) == 1
+          print("manifests ok:", version)
+          PY
