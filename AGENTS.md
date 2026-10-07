@@ -54,7 +54,9 @@ crossreview/
 1. Edit its row in `scripts/agents.tsv`: candidate binaries in preference order, a marker word its
    `--version` or `--help` prints, the arguments that list its models (or `-`), the POSIX template
    and the PowerShell template (`cmd /d /c --% <the same command>`, `< NUL` instead of
-   `< /dev/null`).
+   `< /dev/null`). A CLI that reads its prompt from stdin only as a stream-json message takes
+   `< {brief_json} > {out_json}` instead of `< {brief} > {out}`; the helper speaks Antigravity's
+   event shapes (`stream_message`, `read_stream`), so another CLI of that kind needs its own there.
 2. If it can list models, add a parser in `crossreview.py` (`parse_<agent>_models`) and a test with
    a captured sample of its output.
 3. Document it in `references/agents.md`: the template, how it stays read-only, the model listing,

@@ -4,14 +4,14 @@ description: >
   Run when the user invokes /crossreview (or /crossreview:setup to choose the reviewers) or asks
   for a cross-review, a quorum review or a second opinion from other agents or models: fan a code
   review (uncommitted work, a branch, a commit range, files, a plan or a document) out to several
-  console code agents (Claude Code, Codex, Coddy, Cursor Agent, Devin, OpenCode, Gemini CLI, Qwen
-  Code, Kimi, Koda) that review it in parallel and blind to each other, then, as the orchestrator,
-  verify every finding against the code and decide alone what matters and what to fix. Works from
+  console code agents (Claude Code, Codex, Coddy, Cursor Agent, Devin, OpenCode, Antigravity, Gemini
+  CLI, Qwen Code, Kimi, Koda) that review it in parallel and blind to each other, then, as the
+  orchestrator, verify every finding against the code and decide alone what matters and what to fix. Works from
   any agent with a shell on Linux, macOS and Windows; the first run detects the installed CLIs,
   asks which agents and which of their models to use, and keeps the reviewer roster either for
   the project (in the agent's folder of the repository) or for all projects (in the agent's home).
 metadata:
-  version: 2.0.0
+  version: 2.1.0
   author: Pavel Rykov <paul@drteam.rocks>
   homepage: https://github.com/EvilFreelancer/crossreview
 ---
@@ -214,4 +214,6 @@ substitute the quoted paths of the brief and of its output file for `{brief}` an
 `CROSSREVIEW_DEPTH=1 ` in front of the command (`$env:CROSSREVIEW_DEPTH = '1'; ` in PowerShell) so
 the reviewer knows not to start a crossreview of its own, and start it with your own background
 shell tool in an empty directory, each under a time limit; wait for all of them, then continue at
-step 5.
+step 5. A template with `{brief_json}` and `{out_json}` (Antigravity) needs two more steps by hand,
+both in `references/agents.md`: wrap the brief into one JSON line, and take the review out of the
+event stream the CLI prints.

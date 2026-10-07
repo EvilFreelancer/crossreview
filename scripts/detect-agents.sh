@@ -7,7 +7,8 @@
 # The agents and their command templates come from agents.tsv next to this
 # script, the same table crossreview.py and detect-agents.ps1 read. The
 # template keeps the {model}, {brief} and {out} placeholders: {model} is filled
-# in when the roster is written, {brief} and {out} on every run. models_cmd is
+# in when the roster is written, {brief} and {out} (or {brief_json} and
+# {out_json}, for a stream-json CLI) on every run. models_cmd is
 # empty when the CLI cannot list its own models (or the listing failed), and
 # the user types the model id instead.
 #

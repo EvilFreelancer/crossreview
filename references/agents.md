@@ -3,7 +3,8 @@
 Every reviewer is a console code agent run once, non-interactively, on the brief. The templates
 live in `scripts/agents.tsv`, the single table the helper and both detection scripts read; this page
 explains them. `{bin}` is the detected binary, `{model}` is written into the roster, `{brief}` and
-`{out}` are filled in for every run.
+`{out}` are filled in for every run. `{brief_json}` and `{out_json}` stand in for them when a CLI
+speaks stream-json (see Antigravity below).
 
 Rules every template follows, and why:
 
@@ -153,6 +154,40 @@ kimi --quiet --plan -m {model} < {brief} > {out}
   (every action approved), so `--plan` and the empty `work` directory are what keep it harmless.
 - Stdin is read as the prompt in print mode (checked).
 - Unverified (1.30.0 installed, the key on this machine is rejected with 401).
+
+## antigravity (Antigravity CLI)
+
+```
+agy --model {model} --mode plan --input-format stream-json --output-format stream-json -p= < {brief_json} > {out_json}
+```
+
+- In print mode `agy` takes the prompt only as the value of `-p`, an argument, and does not read
+  plain text from stdin. Its stream-json input has no such limit, so the helper writes the brief
+  once per run as `brief.stream.json`, one ASCII line
+  `{"event":"user","message":{"content":"<the brief>"}}`, and feeds that file to stdin
+  (`{brief_json}`). `-p=` with an empty value is required: a bare `-p` takes the next flag as the
+  prompt.
+- The CLI answers with one JSON event per line. They go to `reviews/<name>.jsonl` (`{out_json}`),
+  and when the reviewer ends the helper writes the `response` of the last `result` event to
+  `reviews/<name>.md`. A `result` whose status is not `SUCCESS` makes the reviewer `failed`,
+  whatever the exit code, with the status and the error in its `.err`; the tool calls that result
+  lists as denied go there too. A stream cut short by a timeout leaves the text of the last agent
+  response as a partial review.
+- **Not read-only** in print mode: `--mode plan` did not stop a file write, inside or outside the
+  working directory, when the prompt asked for one (checked on 1.3.0). Shell commands are denied,
+  because print mode cannot ask for the permission. So this reviewer rests on the brief's tool ban
+  and the empty `work` directory. Do not add `--disable-slash-commands`: the CLI warns that
+  `--mode plan` has no effect with it.
+- Every run is a conversation in the user's Antigravity history.
+- Models: `agy models` prints `id<TAB>name`, reasoning levels included in the id
+  (`gemini-3.8-flash-high`, `gemini-3.1-pro-low`).
+- Verified on 1.3.0 (Windows): `gemini-3.8-flash-high` reviewed a 47 KB brief in 7 min,
+  `gemini-3.1-pro-high` a 43 KB one in 3.5 min. Nothing arrives in the stream while the model
+  thinks, so a quiet `.jsonl` is not a hung reviewer.
+- Recover: the conversation id is in the `init` event, the first line of `reviews/<name>.jsonl`;
+  `agy --conversation <id> --mode plan -p="Do not call tools. Write your final review now."`.
+- By hand, without the helper: build the JSON line with any JSON encoder, and read
+  `.result.response` from the last line of the output whose `event` is `result`.
 
 ## koda
 

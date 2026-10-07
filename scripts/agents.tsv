@@ -6,6 +6,9 @@
 # posix / powershell: command templates; {bin}, {model}, {brief} and {out} are placeholders.
 # Every template feeds the brief through stdin or a file flag, except koda's: that CLI takes the
 # prompt only as an argument, and the helper refuses it when the brief is too long for one.
+# {brief_json} and {out_json} are for a CLI that reads its prompt only as a stream-json message
+# (antigravity): the helper wraps the brief into one JSON line for stdin and writes the
+# response it finds in the event stream to {out}.
 # The PowerShell column hands redirection to cmd.exe (--% passes the rest verbatim), which moves
 # bytes as they are: PowerShell's own | and > re-encode text (UTF-16, the OEM code page).
 # agent	binaries	marker	models	posix	powershell
@@ -18,4 +21,5 @@ opencode	opencode	opencode	models	{bin} run -m {model} --agent plan < {brief} > 
 gemini	gemini	gemini	-	{bin} -m {model} --approval-mode plan -o text < {brief} > {out}	cmd /d /c --% {bin} -m {model} --approval-mode plan -o text < {brief} > {out}
 qwen	qwen	qwen	-	{bin} -m {model} --approval-mode plan -o text < {brief} > {out}	cmd /d /c --% {bin} -m {model} --approval-mode plan -o text < {brief} > {out}
 kimi	kimi	kimi	-	{bin} --quiet --plan -m {model} < {brief} > {out}	cmd /d /c --% {bin} --quiet --plan -m {model} < {brief} > {out}
+antigravity	agy	agy	models	{bin} --model {model} --mode plan --input-format stream-json --output-format stream-json -p= < {brief_json} > {out_json}	cmd /d /c --% {bin} --model {model} --mode plan --input-format stream-json --output-format stream-json -p= < {brief_json} > {out_json}
 koda	koda	koda	-	{bin} "$(cat {brief})" > {out}	{bin} "$(Get-Content -Raw -Encoding UTF8 {brief})" > {out}

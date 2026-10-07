@@ -34,7 +34,7 @@ one project or for all of them (below).
 | `reviewers[].agent` | Row of `scripts/agents.tsv` the entry came from; used for warnings and `init --refresh`. |
 | `reviewers[].binary` | The binary detection found (`agent`, `cursor-agent`, a path). Informational: the command is what runs. |
 | `reviewers[].model` | The model written into the command; a `{model}` left in `command` is filled with it. Letters, digits and `._:/@+=,[]-` only. |
-| `reviewers[].command` | What runs, with `{brief}` and `{out}` left as placeholders. Authoritative: it runs exactly as written, so a wrapper, a proxy alias or an extra flag (`-c model_reasoning_effort=high`) belongs here. |
+| `reviewers[].command` | What runs, with `{brief}` and `{out}` left as placeholders (`{brief_json}` and `{out_json}` for a stream-json CLI, see `agents.md`). Authoritative: it runs exactly as written, so a wrapper, a proxy alias or an extra flag (`-c model_reasoning_effort=high`) belongs here. |
 | `reviewers[].enabled` | `false` keeps the entry without running it. |
 | `reviewers[].host` | For `internal`: the agent that runs it as its own subagent (`claude`, `coddy`, `opencode`). Other hosts skip it; Coddy's when it is missing. |
 | `reviewers[].definition`, `reasoning` | For Coddy's internal reviewers: the subagent definition (only `explore` is honoured) and the reasoning level. |

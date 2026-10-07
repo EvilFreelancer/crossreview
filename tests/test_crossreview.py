@@ -59,6 +59,41 @@ STUB_REVIEWER = textwrap.dedent('''
 ''')
 
 
+# Antigravity's side of the stream-json exchange: one user event in, events out.
+# The model name picks the behaviour.
+STUB_AGY = textwrap.dedent('''
+    import json, sys, time
+    args = sys.argv[1:]
+    model = args[args.index("--model") + 1]
+    assert "-p=" in args and args[args.index("--input-format") + 1] == "stream-json", args
+    content = json.loads(sys.stdin.buffer.readline().decode("ascii"))["message"]["content"]
+    def emit(event, **body):
+        sys.stdout.write(json.dumps(dict({"event": event}, **body)) + "\\n")
+        sys.stdout.flush()
+    def delta(index, text):
+        emit("step_update", step_update={"step_index": index, "step_type": "agent_response", "text_delta": text})
+    emit("init", conversation_id="c1", init={"model": model})
+    emit("step_update", step_update={"step_index": 0, "step_type": "user_input", "state": "DONE"})
+    if model == "echo":
+        delta(1, content[:4])
+        emit("result", result={"status": "SUCCESS", "response": content})
+    elif model == "quota":
+        emit("result", result={"status": "ERROR", "response": "", "error": "RESOURCE_EXHAUSTED: quota exceeded"})
+        sys.exit(1)
+    elif model == "cut-off":
+        emit("result", result={"status": "ERROR", "response": "1. high: half a review", "error": "turn aborted"})
+    elif model == "denied":
+        delta(1, "Let me run a command first.")
+        emit("result", result={"status": "SUCCESS", "response": "",
+                               "denied_actions": [{"action": "command", "display_name": "RunCommand"}]})
+    elif model == "slow":
+        delta(1, "thinking aloud")
+        delta(2, "partial ")
+        delta(2, "answer")
+        time.sleep(60)
+''')
+
+
 def write_stub(bin_dir: Path, name: str, version: str = "", help_text: str = "", rc: int = 0,
                models: str = "", models_out: str = "") -> None:
     """An executable that prints `version` for --version and `help_text` for --help."""
@@ -139,8 +174,9 @@ class TableTest(unittest.TestCase):
         self.assertIn("cursor", table)
         for spec in table.values():
             for template in (spec.posix, spec.powershell):
-                for placeholder in ("{bin}", "{brief}", "{out}"):
-                    self.assertIn(placeholder, template, "%s: %s" % (spec.agent, template))
+                self.assertIn("{bin}", template, "%s: %s" % (spec.agent, template))
+                for plain, stream in (("{brief}", cr.BRIEF_JSON), ("{out}", cr.OUT_JSON)):
+                    self.assertTrue(plain in template or stream in template, "%s: %s" % (spec.agent, template))
                 if spec.agent != "koda":
                     self.assertIn("{model}", template, spec.agent)
                     self.assertNotIn("$(", template, "%s passes the brief as an argument" % spec.agent)
@@ -196,6 +232,40 @@ class ModelsParsingTest(unittest.TestCase):
                 "  swe-2-medium                       SWE-2 Medium  [262K context, Free]\n")
         self.assertEqual(cr.parse_devin_models(text), ["swe-2-high", "swe-2-medium"])
 
+    def test_antigravity_list(self):
+        text = ("Fetching available models...\n\x1b[Kgemini-3.8-flash-high\tGemini 3.8 Flash (High)\r\n"
+                "claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\ngpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n")
+        self.assertEqual(cr.parse_antigravity_models(text),
+                         ["gemini-3.8-flash-high", "claude-sonnet-4-6", "gpt-oss-120b-medium"])
+        self.assertEqual(cr.parse_antigravity_models("\x1b[1mgemini-3.1-pro-low\x1b[0m\tGemini 3.1 Pro (Low)\n"),
+                         ["gemini-3.1-pro-low"])
+
+    def test_antigravity_stream(self):
+        # Events as agy 1.3.0 printed them, shortened.
+        events = [
+            {"event": "init", "conversation_id": "c2f55968", "init": {"model": "gemini-3.8-flash-low"}},
+            {"event": "step_update", "step_update": {"conversation_id": "c2f55968", "step_index": 0,
+                                                     "state": "DONE", "step_type": "user_input"}},
+            {"event": "step_update", "step_update": {"conversation_id": "c2f55968", "step_index": 1,
+                                                     "state": "ACTIVE", "step_type": "agent_response",
+                                                     "text_delta": "ZEBRA"}},
+            {"event": "step_update", "step_update": {"conversation_id": "c2f55968", "step_index": 1,
+                                                     "state": "DONE", "step_type": "agent_response",
+                                                     "text_delta": "-41\n", "duration_seconds": 3.9}},
+        ]
+        result = {"event": "result", "result": {"conversation_id": "c2f55968", "status": "SUCCESS",
+                                                "response": "ZEBRA-41\n", "num_turns": 1}}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "r.jsonl"
+            path.write_text("".join(json.dumps(e) + "\n" for e in events) + "not json\n", encoding="utf-8")
+            self.assertEqual(cr.read_stream(path), ("ZEBRA-41\n", "", False))
+            path.write_text("".join(json.dumps(e) + "\n" for e in events + [result]), encoding="utf-8")
+            self.assertEqual(cr.read_stream(path), ("ZEBRA-41\n", "", False))
+            result["result"].update(status="ERROR", response="", error="stream input has no content")
+            path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+            self.assertEqual(cr.read_stream(path), ("", "ERROR: stream input has no content", True))
+            self.assertEqual(cr.read_stream(Path(tmp) / "missing.jsonl"), ("", "", False))
+
     def test_opencode_list(self):
         self.assertEqual(cr.parse_opencode_models("opencode/big-pickle\nrpa/gpt-oss:120b\n\nnoise line\n"),
                          ["opencode/big-pickle", "rpa/gpt-oss:120b"])
@@ -237,12 +307,15 @@ class DetectTest(TempCase):
         write_stub(bin_dir, "devin", rc=1)                                  # on PATH, but not the agent
         write_stub(bin_dir, "agent", version="1.0", help_text="some other tool")  # unrelated `agent`
         write_stub(bin_dir, "cursor-agent", version="2026.10.01", help_text="Start the Cursor Agent")
+        write_stub(bin_dir, "agy", version="1.3.0", help_text="Usage of agy:", models="models", models_out="m1")
         return os.pathsep.join([str(bin_dir), tools_path(self.tmp)])
 
     def test_python_detection(self):
         os.environ["PATH"] = self.stub_path()
         found = {d.agent: d for d in cr.detect(cr.load_table())}
-        self.assertEqual(sorted(found), ["claude", "codex", "cursor"])
+        self.assertEqual(sorted(found), ["antigravity", "claude", "codex", "cursor"])
+        self.assertEqual(found["antigravity"].models_cmd, "agy models")
+        self.assertIn("< {brief_json} > {out_json}", found["antigravity"].template)
         self.assertEqual(found["claude"].models_cmd, "")
         self.assertEqual(found["codex"].models_cmd, "codex debug models")
         self.assertEqual(found["cursor"].binary, "cursor-agent")
@@ -250,7 +323,7 @@ class DetectTest(TempCase):
             ("cmd /d /c --% " if IS_WINDOWS else "") + "cursor-agent -p --trust"), found["cursor"].template)
         for d in found.values():
             self.assertNotIn("{bin}", d.template)
-            self.assertIn("{brief}", d.template)
+            self.assertIn("{brief", d.template)
 
     @unittest.skipIf(IS_WINDOWS, "detect-agents.sh is the POSIX twin")
     def test_shell_detection_matches_python(self):
@@ -262,7 +335,7 @@ class DetectTest(TempCase):
         rc, out, err = self.helper("detect", env=env)
         self.assertEqual(rc, 0, err)
         self.assertEqual(sh.stdout.decode(), out)
-        self.assertEqual(len(out.strip().splitlines()), 3)
+        self.assertEqual(len(out.strip().splitlines()), 4)
 
     @unittest.skipUnless(POWERSHELLS, "no PowerShell")
     def test_powershell_detection_matches_python(self):
@@ -276,11 +349,12 @@ class DetectTest(TempCase):
                                     stderr=subprocess.PIPE, timeout=180)
                 self.assertEqual(ps.returncode, 0, ps.stderr)
                 lines = sorted(ps.stdout.decode().strip().splitlines())
-                self.assertEqual([ln.split("\t")[0] for ln in lines], ["claude", "codex", "cursor"], lines)
+                self.assertEqual([ln.split("\t")[0] for ln in lines],
+                                 ["antigravity", "claude", "codex", "cursor"], lines)
                 for ln in lines:
                     agent, _, models_cmd, template = ln.split("\t")
-                    self.assertEqual(template, cr.fill(table[agent].powershell,
-                                                       bin="cursor-agent" if agent == "cursor" else agent))
+                    self.assertEqual(template, cr.fill(table[agent].powershell, bin={
+                        "cursor": "cursor-agent", "antigravity": "agy"}.get(agent, agent)))
                     if agent == "codex":
                         self.assertEqual(models_cmd, "codex debug models")
 
@@ -898,6 +972,76 @@ class RunTest(TempCase):
         self.assertEqual((run_dir / "reviews" / "shim.md").read_bytes(), self.brief.read_bytes())
         self.assertEqual(by_name["shim-arg"]["status"], "failed")
         self.assertIn("batch file", by_name["shim-arg"]["note"])
+
+    def agy_command(self, model: str) -> str:
+        """The table's own antigravity template, with a stub `agy` first on PATH."""
+        bin_dir = self.tmp / "agy-bin"
+        if not bin_dir.exists():
+            bin_dir.mkdir()
+            stub = bin_dir / "stub_agy.py"
+            stub.write_text(STUB_AGY, encoding="utf-8")
+            if IS_WINDOWS:
+                (bin_dir / "agy.cmd").write_text('@"%s" "%s" %%*\r\n' % (sys.executable, stub), encoding="ascii")
+            else:
+                shim = bin_dir / "agy"
+                shim.write_text('#!/bin/sh\nexec "%s" "%s" "$@"\n' % (sys.executable, stub), encoding="utf-8")
+                shim.chmod(0o755)
+            os.environ["PATH"] = os.pathsep.join([str(bin_dir), os.environ["PATH"]])
+        return cr.fill(cr.load_table()["antigravity"].template(), bin="agy", model=model)
+
+    def test_a_stream_json_reviewer_gets_the_brief_and_leaves_a_review(self):
+        # Longer than one argument may be anywhere, with line endings and scripts a code page would mangle.
+        payload = ("Review this: значение, 値, café\r\nsecond line\n" * 4000).encode("utf-8")
+        self.assertGreater(len(payload), 130_000)
+        self.brief.write_bytes(payload)
+        roster = self.roster([{"name": "agy", "agent": "antigravity", "command": self.agy_command("echo")}])
+        rc, out, status, run_dir = self.run_and_wait(roster)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(status["reviewers"][0]["status"], "done", out)
+        self.assertEqual((run_dir / "reviews" / "agy.md").read_bytes(), payload)
+        self.assertIn(b'"event": "result"', (run_dir / "reviews" / "agy.jsonl").read_bytes())
+        line = (run_dir / "brief.stream.json").read_bytes()
+        self.assertTrue(all(b < 128 for b in line) and line.endswith(b"\n") and line.count(b"\n") == 1, line[:80])
+        self.assertEqual(json.loads(line.decode("ascii")),
+                         {"event": "user", "message": {"content": payload.decode("utf-8")}})
+        rc, listed, _ = self.helper("roster", "--roster", roster)
+        self.assertNotIn("warning", listed)
+        mixed = self.roster([{"name": "agy", "command": self.agy_command("echo").replace("{out_json}", "{out}")}])
+        rc, listed, _ = self.helper("roster", "--roster", mixed)
+        self.assertIn("belong together", listed)
+
+    def test_a_stream_json_reviewer_that_fails_says_why(self):
+        roster = self.roster([{"name": "quota", "command": self.agy_command("quota")},
+                              {"name": "cut-off", "command": self.agy_command("cut-off")},
+                              {"name": "denied", "command": self.agy_command("denied")},
+                              {"name": "slow", "command": self.agy_command("slow"), "timeout": 3}])
+        rc, out, status, run_dir = self.run_and_wait(roster)
+        self.assertEqual(rc, 0, out)
+        by_name = {r["name"]: r for r in status["reviewers"]}
+        self.assertEqual((by_name["quota"]["status"], by_name["quota"]["note"]), ("failed", "usage or rate limit"))
+        # An error the CLI reports is a failure even with exit code 0, and what it wrote is kept.
+        self.assertEqual((by_name["cut-off"]["status"], by_name["cut-off"]["rc"]), ("failed", 0))
+        self.assertIn("turn aborted", by_name["cut-off"]["note"])
+        self.assertEqual((run_dir / "reviews" / "cut-off.md").read_text(encoding="utf-8"), "1. high: half a review")
+        self.assertEqual(by_name["denied"]["status"], "empty")
+        self.assertIn("denied tool calls: RunCommand", by_name["denied"]["note"])
+        self.assertEqual(by_name["slow"]["status"], "timeout")
+        self.assertEqual((run_dir / "reviews" / "slow.md").read_text(encoding="utf-8"), "partial answer")
+        rc, _, err = self.helper("retry", run_dir, "quota")
+        self.assertEqual(rc, 0, err)
+        rc, out, _ = self.helper("wait", run_dir, "--max", "60")
+        self.assertEqual(rc, 0, out)
+        self.assertTrue((run_dir / "reviews" / "quota.attempt1.jsonl").exists())
+
+    def test_a_stream_json_reviewer_refuses_a_brief_that_is_not_utf8(self):
+        self.brief.write_bytes("Review this: значение\n".encode("cp1251"))
+        roster = self.roster([{"name": "agy", "command": self.agy_command("echo")},
+                              {"name": "good", "command": self.command("ok")}])
+        rc, out, status, _ = self.run_and_wait(roster)
+        by_name = {r["name"]: r for r in status["reviewers"]}
+        self.assertEqual(by_name["agy"]["status"], "failed", out)
+        self.assertIn("UTF-8", by_name["agy"]["note"])
+        self.assertEqual(by_name["good"]["status"], "done")
 
     def test_one_off_reviewers_and_unknown_names(self):
         roster = self.roster([{"name": "good", "command": self.command("ok")}])
