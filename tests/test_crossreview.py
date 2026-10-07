@@ -84,6 +84,10 @@ STUB_AGY = textwrap.dedent('''
         sys.exit(1)
     elif model == "cut-off":
         emit("result", result={"status": "ERROR", "response": "1. high: half a review", "error": "turn aborted"})
+    elif model == "aborted":
+        delta(1, "1. medium: half a")
+        delta(1, " finding")
+        emit("result", result={"status": "ERROR", "response": "", "error": "turn aborted"})
     elif model == "denied":
         delta(1, "Let me run a command first.")
         emit("result", result={"status": "SUCCESS", "response": "",
@@ -202,7 +206,8 @@ class TableTest(unittest.TestCase):
         for windows in (False, True):
             template = cr.load_table()["antigravity"].template(windows)
             self.assertNotIn("{scripts}", template)
-            self.assertIn('"%s' % cr.HERE, template)
+            # Quoted whole: a shell must not split the path, nor expand anything in it on POSIX.
+            self.assertIn(('"%s\\agy-stream.py"' if windows else "'%s/agy-stream.py'") % cr.HERE, template)
         self.assertTrue((cr.HERE / "agy-stream.py").is_file())
 
     def test_cursor_prefers_the_agent_alias(self):
@@ -1019,7 +1024,7 @@ class RunTest(TempCase):
 
     def test_antigravity_failures_say_why(self):
         roster = self.roster([{"name": name, "command": self.agy_command(name)}
-                              for name in ("quota", "cut-off", "denied", "died")]
+                              for name in ("quota", "cut-off", "aborted", "denied", "died")]
                              + [{"name": "slow", "command": self.agy_command("slow"), "timeout": 3}])
         rc, out, status, run_dir = self.run_and_wait(roster)
         self.assertEqual(rc, 0, out)
@@ -1029,11 +1034,52 @@ class RunTest(TempCase):
         self.assertEqual(by_name["cut-off"]["status"], "failed")
         self.assertIn("turn aborted", by_name["cut-off"]["note"])
         self.assertEqual((run_dir / "reviews" / "cut-off.md").read_text(encoding="utf-8"), "1. high: half a review")
-        self.assertEqual(by_name["denied"]["status"], "empty")
+        self.assertEqual(by_name["aborted"]["status"], "failed")
+        self.assertEqual((run_dir / "reviews" / "aborted.md").read_text(encoding="utf-8"), "1. medium: half a finding")
+        # A turn that ended well with nothing to say is empty: what it said before a tool call is not a review.
+        self.assertEqual((by_name["denied"]["status"], by_name["denied"]["bytes"]), ("empty", 0))
         self.assertIn("denied tool calls: RunCommand", by_name["denied"]["note"])
         self.assertEqual((by_name["died"]["status"], by_name["died"]["rc"]), ("failed", 3))
         self.assertEqual((run_dir / "reviews" / "died.md").read_text(encoding="utf-8"), "partial answer")
         self.assertEqual(by_name["slow"]["status"], "timeout")
+        # The id that recovers the answer is on stderr before the CLI is done, so a timeout keeps it.
+        self.assertIn("conversation c1", (run_dir / "reviews" / "slow.err").read_text(encoding="utf-8"))
+
+    def test_antigravity_events_as_the_cli_prints_them(self):
+        # Lines captured from agy 1.3.0 on Windows; the tools list is shortened.
+        lines = [
+            b'{"event":"init","conversation_id":"1342d87c-b01f-4111-bf5b-5111a2c47fd7","init":{"model":'
+            b'"gemini-3.8-flash-low","cwd":"C:\\\\Temp\\\\x","tools":["ask_permission","view_file"],'
+            b'"permission_mode":"request-review"}}',
+            b'{"event":"step_update","step_update":{"conversation_id":"1342d87c-b01f-4111-bf5b-5111a2c47fd7",'
+            b'"step_index":0,"state":"DONE","step_type":"user_input"}}',
+            b'{"event":"step_update","step_update":{"conversation_id":"1342d87c-b01f-4111-bf5b-5111a2c47fd7",'
+            b'"step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"ZEBRA"}}',
+            b'{"event":"step_update","step_update":{"conversation_id":"1342d87c-b01f-4111-bf5b-5111a2c47fd7",'
+            b'"step_index":1,"state":"DONE","step_type":"agent_response","text_delta":"-41\\n",'
+            b'"duration_seconds":3.9463424,"usage":{"input_tokens":22909,"output_tokens":5}}}',
+            b'warning: not an event',
+        ]
+        result = (b'{"event":"result","result":{"conversation_id":"1342d87c-b01f-4111-bf5b-5111a2c47fd7",'
+                  b'"status":"SUCCESS","response":"ZEBRA-41\\n","duration_seconds":20.2981523,"num_turns":1}}')
+        denied = (b'{"event":"result","result":{"conversation_id":"0aea5905","status":"SUCCESS","response":"",'
+                  b'"num_turns":1,"denied_actions":[{"action":"command","display_name":"RunCommand"}]}}')
+        import contextlib
+        import importlib.util
+        import io
+        spec = importlib.util.spec_from_file_location("agy_stream", str(SCRIPTS / "agy-stream.py"))
+        agy = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(agy)
+        said = io.StringIO()
+        with contextlib.redirect_stderr(said):
+            self.assertEqual(agy.read_events(lines), (None, "ZEBRA-41\n"))
+            found, _ = agy.read_events(lines + [result])
+            self.assertEqual((found["status"], found["response"]), ("SUCCESS", "ZEBRA-41\n"))
+            found, _ = agy.read_events([denied])
+            self.assertEqual(found["denied_actions"][0]["display_name"], "RunCommand")
+        self.assertIn("conversation 1342d87c-b01f-4111-bf5b-5111a2c47fd7", said.getvalue())
+        self.assertEqual(json.loads(agy.message("значение\r\n").decode("ascii")),
+                         {"event": "user", "message": {"content": "значение\r\n"}})
 
     def test_antigravity_refuses_a_brief_that_is_not_utf8(self):
         self.brief.write_bytes("Review this: значение\n".encode("cp1251"))

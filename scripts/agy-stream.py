@@ -18,6 +18,7 @@ import json
 import shutil
 import subprocess
 import sys
+import threading
 
 NAME = "agy-stream"
 
@@ -33,7 +34,9 @@ def message(brief: str) -> bytes:
 
 
 def read_events(lines) -> tuple:
-    """(result or None, text of the last agent response) from the CLI's event lines."""
+    """(result or None, text of the last agent response) from the CLI's event
+    lines, read as they arrive: the conversation id is reported at once, so a
+    run that is cut short still leaves it behind."""
     result, partial, last = None, {}, None
     for raw in lines:
         try:
@@ -43,7 +46,7 @@ def read_events(lines) -> tuple:
         if not isinstance(event, dict):
             continue
         if event.get("event") == "init" and event.get("conversation_id"):
-            # Enough to take the answer out of a run that was cut short:
+            # Enough to take the answer out of a run that timed out:
             # agy --conversation <id> -p="Write your final review now."
             say("conversation %s" % event["conversation_id"])
         if event.get("event") == "result" and isinstance(event.get("result"), dict):
@@ -72,22 +75,36 @@ def main(argv) -> int:
     except OSError as exc:
         say("cannot start %s: %s" % (binary[0], exc))
         return 127
-    out, _ = proc.communicate(message(brief))
-    result, partial = read_events(out.splitlines())
+
+    def send() -> None:
+        # From a thread: a brief longer than a pipe holds must not wait for a
+        # CLI that is already writing events nobody reads yet.
+        try:
+            proc.stdin.write(message(brief))
+            proc.stdin.close()
+        except OSError:
+            pass  # the CLI went away; its exit code and stderr say why
+
+    threading.Thread(target=send, daemon=True).start()
+    result, partial = read_events(proc.stdout)
+    code = proc.wait()
     if result is None:
         sys.stdout.buffer.write(partial.encode("utf-8"))
-        say("the CLI ended without a result (exit code %s)" % proc.returncode)
-        return proc.returncode or 1
-    sys.stdout.buffer.write(str(result.get("response") or "").encode("utf-8"))
+        say("the CLI ended without a result (exit code %s)" % code)
+        return code or 1
+    failed = result.get("status") != "SUCCESS"
+    # A failed turn may report no response at all: what it had streamed is still worth reading.
+    review = result.get("response") or (partial if failed else "")
+    sys.stdout.buffer.write(str(review).encode("utf-8"))
     sys.stdout.flush()
     denied = [a.get("display_name") or a.get("action") or "?" for a in result.get("denied_actions") or []
               if isinstance(a, dict)]
     if denied:
         say("denied tool calls: %s" % ", ".join(denied))
-    if result.get("status") != "SUCCESS":
+    if failed:
         say("%s: %s" % (result.get("status") or "no status", result.get("error") or "no error text"))
-        return proc.returncode or 1
-    return proc.returncode
+        return code or 1
+    return code
 
 
 if __name__ == "__main__":
