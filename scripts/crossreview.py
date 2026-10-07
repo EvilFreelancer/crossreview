@@ -78,7 +78,9 @@ class AgentSpec:
         self.powershell = powershell
 
     def template(self, windows=IS_WINDOWS):
-        return self.powershell if windows else self.posix
+        """The command template of this system; {scripts}, the directory of the
+        table, is known here and filled in, the rest by whoever detects and runs."""
+        return (self.powershell if windows else self.posix).replace("{scripts}", str(HERE))
 
 
 def load_table(path=TABLE_PATH) -> Dict[str, AgentSpec]:
@@ -402,10 +404,13 @@ HOSTS = {
     "gemini": (None, "~/.gemini", ".gemini"),
     "qwen": (None, "~/.qwen", ".qwen"),
     "kimi": (None, "~/.kimi", ".kimi"),
+    # Antigravity keeps its settings.json there, and a project's customizations in .agents.
+    "antigravity": (None, "~/.gemini/antigravity-cli", ".agents"),
 }
 OTHER_HOST = (None, "~/.agents", ".agents")
 HOST_ALIASES = {"claude-code": "claude", "claudecode": "claude", "cursor-agent": "cursor", "agent": "cursor",
-                "codex-cli": "codex", "qwen-code": "qwen", "gemini-cli": "gemini", "kimi-cli": "kimi"}
+                "codex-cli": "codex", "qwen-code": "qwen", "gemini-cli": "gemini", "kimi-cli": "kimi",
+                "agy": "antigravity", "antigravity-cli": "antigravity"}
 ROSTER_FILE = "crossreview.json"
 TRUST_FILE = "crossreview-trust.json"
 SCOPES = ("local", "global")
@@ -638,12 +643,6 @@ def normalize_entries(roster: dict, origin: str = "user") -> List[dict]:
     return out
 
 
-# For a CLI that takes its prompt only as a stream-json message (Antigravity):
-# {brief_json} is the brief wrapped into one JSON line, {out_json} the file its
-# event stream goes to; the response found there becomes the review in {out}.
-BRIEF_JSON = "{brief_json}"
-OUT_JSON = "{out_json}"
-
 KNOWN_ISSUES = (
     (re.compile(r"\"\$\((cat|Get-Content)\b"),
      "passes the brief as an argument: a brief over 128 KB fails with 'Argument list too long' "
@@ -660,12 +659,9 @@ def entry_warnings(entry: dict, table: Dict[str, AgentSpec]) -> List[str]:
         return []
     warnings = []
     command = entry.get("command") or ""
-    for placeholder, stream in (("{brief}", BRIEF_JSON), ("{out}", OUT_JSON)):
-        if placeholder not in command and stream not in command:
+    for placeholder in ("{brief}", "{out}"):
+        if placeholder not in command:
             warnings.append("command has no %s placeholder" % placeholder)
-    if (BRIEF_JSON in command) != (OUT_JSON in command):
-        warnings.append("%s and %s belong together: a stream-json CLI reads the one and writes the other"
-                        % (BRIEF_JSON, OUT_JSON))
     if "{model}" in command:
         warnings.append("command still holds {model}: write the model into it")
     spec = table.get(entry.get("agent", ""))
@@ -1134,65 +1130,15 @@ def ps_quote(s: str) -> str:
     return "'" + s.replace("'", "''") + "'"
 
 
-def render_shell(command: str, paths: Dict[str, str]) -> List[str]:
-    """The command for a shell, every placeholder of `paths` replaced by its quoted path."""
+def render_shell(command: str, brief: str, out: str) -> List[str]:
     if IS_WINDOWS:
         exe = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
         # After --% the line belongs to cmd.exe, which knows only double quotes.
         quote = (lambda p: '"%s"' % p) if "--%" in command else ps_quote
-        return [exe, "-NoProfile", "-NonInteractive", "-Command", fill_paths(command, paths, quote)]
-    return [shutil.which("sh") or "/bin/sh", "-c", fill_paths(command, paths, shlex.quote)]
-
-
-def fill_paths(text: str, paths: Dict[str, str], quote=str) -> str:
-    for placeholder, path in paths.items():
-        text = text.replace(placeholder, quote(path))
-    return text
-
-
-def stream_message(brief: str) -> str:
-    """The brief as the one stream-json line Antigravity reads from stdin. ASCII
-    only, so no code page between the helper and the CLI can touch it."""
-    return json.dumps({"event": "user", "message": {"content": brief}}) + "\n"
-
-
-def read_stream(path: Path) -> Tuple[str, str, bool]:
-    """(review, note for stderr, the CLI reported a failure) from the event
-    stream of a stream-json reviewer.
-
-    The review is the response of the last `result` event, kept even when that
-    result is an error: half a review is worth reading. A stream that ends
-    without a result (a timeout, a stop) gives the text of the last agent
-    response it carried."""
-    result, partial = None, {}
-    try:
-        with open(str(path), encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                try:
-                    event = json.loads(line)
-                except ValueError:
-                    continue
-                if not isinstance(event, dict):
-                    continue
-                if event.get("event") == "result" and isinstance(event.get("result"), dict):
-                    result = event["result"]
-                step = event.get("step_update")
-                if isinstance(step, dict) and step.get("step_type") == "agent_response" and step.get("text_delta"):
-                    partial.setdefault(step.get("step_index"), []).append(str(step["text_delta"]))
-    except OSError:
-        return "", "", False
-    if result is None:
-        # Whatever cut the stream short is already in the status or on stderr.
-        return ("".join(partial[max(partial, key=lambda k: k or 0)]) if partial else ""), "", False
-    notes = []
-    failed = result.get("status") != "SUCCESS"
-    if failed:
-        notes.append("%s: %s" % (result.get("status") or "no status", result.get("error") or "no error text"))
-    denied = [a.get("display_name") or a.get("action") or "?" for a in result.get("denied_actions") or []
-              if isinstance(a, dict)]
-    if denied:
-        notes.append("denied tool calls: %s" % ", ".join(denied))
-    return str(result.get("response") or ""), "; ".join(notes), failed
+        rendered = command.replace("{brief}", quote(brief)).replace("{out}", quote(out))
+        return [exe, "-NoProfile", "-NonInteractive", "-Command", rendered]
+    rendered = command.replace("{brief}", shlex.quote(brief)).replace("{out}", shlex.quote(out))
+    return [shutil.which("sh") or "/bin/sh", "-c", rendered]
 
 
 RUN_NAME = re.compile(r"^\d{8}-\d{6}-[A-Za-z0-9_]{4,}$")
@@ -1274,7 +1220,6 @@ def prepare_run(entries: List[dict], brief_src: Path, run_dir: Path, cwd: Option
     brief = run_dir / "brief.md"
     if brief_src.resolve() != brief.resolve():
         shutil.copyfile(str(brief_src), str(brief))
-    brief_json = run_dir / "brief.stream.json"
     names = [e["name"] for e in entries]
     unknown = [n for n in (only or []) if n not in names]
     if unknown:
@@ -1304,26 +1249,9 @@ def prepare_run(entries: List[dict], brief_src: Path, run_dir: Path, cwd: Option
         if "{model}" in command and e.get("model"):
             command = command.replace("{model}", e["model"])
         item["command"] = command
-        paths = {"{brief}": str(brief), "{out}": str(out)}
-        if BRIEF_JSON in command:
-            if not brief_json.exists():
-                try:
-                    # Bytes, not text mode: the brief keeps its line endings.
-                    text = brief.read_bytes().decode("utf-8")
-                except UnicodeDecodeError:
-                    item.update({"status": "failed", "mode": "exec", "argv": [], "rc": None, "bytes": 0,
-                                 "note": "this CLI takes the brief as JSON, which needs UTF-8; the brief is not"})
-                    item["display"] = command
-                    reviewers.append(item)
-                    continue
-                brief_json.write_bytes(stream_message(text).encode("ascii"))
-            paths[BRIEF_JSON] = str(brief_json)
-        if OUT_JSON in command:
-            item["stream"] = str(out.with_suffix(".jsonl"))
-            paths[OUT_JSON] = item["stream"]
         plan = plan_command(command)
         if plan["mode"] == "exec":
-            argv = [fill_paths(a, paths) for a in plan["argv"]]
+            argv = [a.replace("{brief}", str(brief)).replace("{out}", str(out)) for a in plan["argv"]]
             if any(a in ARG_BRIEF for a in plan["argv"]):
                 text = brief.read_text(encoding="utf-8")
                 shim = shutil.which(plan["argv"][0]) or plan["argv"][0]
@@ -1344,20 +1272,18 @@ def prepare_run(entries: List[dict], brief_src: Path, run_dir: Path, cwd: Option
                     continue
                 argv = [text if a in ARG_BRIEF else b for a, b in zip(plan["argv"], argv)]
             stdin = plan["stdin"]
-            if stdin in paths:
-                stdin = paths[stdin]
+            if stdin == "{brief}":
+                stdin = str(brief)
             elif stdin in ("/dev/null", "NUL", "$null"):
                 stdin = None
             stdout = plan["stdout"]
-            if stdout is None:
+            if stdout in (None, "{out}"):
                 stdout = str(out)
-            elif stdout in paths:
-                stdout = paths[stdout]
             item.update({"mode": "exec", "argv": argv, "stdin": stdin, "stdout": stdout})
             item["display"] = " ".join(shlex.quote(a) if len(a) < 300 else "<brief text>" for a in argv) + (
                 " < %s" % shlex.quote(stdin) if stdin else "") + " > %s" % shlex.quote(stdout)
         else:
-            item.update({"mode": "shell", "argv": render_shell(command, paths)})
+            item.update({"mode": "shell", "argv": render_shell(command, str(brief), str(out))})
             item["display"] = item["argv"][-1]
         # The listing is read by people: paths inside the run are shown relative to it.
         for prefix in {str(run_dir) + os.sep, str(run_dir.resolve()) + os.sep}:
@@ -1423,15 +1349,7 @@ def finish_item(item: dict, rc: Optional[int], status: Optional[str] = None, not
     item["ended"] = time.time()
     item["seconds"] = round(item["ended"] - item.get("started", item["ended"]), 1)
     out = Path(item["out"])
-    stream_failed = False
-    if item.get("stream"):
-        review, problem, stream_failed = read_stream(Path(item["stream"]))
-        if review.strip():
-            out.write_bytes(review.encode("utf-8"))
-        if problem:
-            with open(item["err"], "a", encoding="utf-8") as fh:
-                fh.write("crossreview: %s\n" % problem)
-    elif item.get("mode") == "shell" and (not out.exists() or out.stat().st_size == 0):
+    if item.get("mode") == "shell" and (not out.exists() or out.stat().st_size == 0):
         log = Path(item["log"])
         if log.exists() and log.stat().st_size > 0:
             shutil.copyfile(str(log), str(out))
@@ -1445,10 +1363,7 @@ def finish_item(item: dict, rc: Optional[int], status: Optional[str] = None, not
         item["note"] = note or (failure_hint(item) if not text.strip() else "partial output kept")
         return
     hint = failure_hint(item)
-    if stream_failed:
-        # The CLI said so itself, whatever it exited with and whatever text it left.
-        item["status"], item["note"] = "failed", hint
-    elif rc == 0 and text.strip():
+    if rc == 0 and text.strip():
         # A CLI that prints an API error and exits 0 still left no review. Only
         # the CLI's own streams, or an answer that opens like an error, say so:
         # a short review may well talk about 401s and rate limits.
@@ -1779,7 +1694,7 @@ def cmd_retry(args) -> int:
             ", ".join(unknown), ", ".join(sorted(names))))
     for item in plan["reviewers"]:
         if item["name"] in args.names:
-            for suffix in (".md", ".err", ".log", ".jsonl"):
+            for suffix in (".md", ".err", ".log"):
                 path = Path(item["out"]).with_suffix(suffix)
                 if path.exists() and path.stat().st_size:
                     n = 1

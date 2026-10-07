@@ -40,7 +40,7 @@ load a skill (Claude Code's "Base directory", Coddy's "Skill directory"). If you
 the first of these that holds `scripts/crossreview.py`, and do not search the whole disk:
 `${CODDY_HOME:-~/.coddy}/skills/crossreview`, then `crossreview` under `~/.claude/skills`,
 `~/.codex/skills`, `~/.cursor/skills`, `~/.agents/skills`, `~/.config/opencode/skills`,
-`~/.config/devin/skills`, and under the workspace's `.claude/skills`, `.agents/skills`,
+`~/.config/devin/skills`, `~/.gemini/antigravity-cli/skills`, and under the workspace's `.claude/skills`, `.agents/skills`,
 `.cursor/skills`, `.opencode/skills`, `.coddy/skills`.
 
 The helper is `python3 <skill>/scripts/crossreview.py` (`py -3` or `python` on Windows), standard
@@ -49,6 +49,7 @@ see the last section.
 
 **Who you are.** Every helper command that reads or writes a roster takes `--host <you>`:
 `claude` (Claude Code), `codex`, `coddy`, `cursor`, `opencode`, `devin`, `gemini`, `qwen`, `kimi`,
+`antigravity`,
 or your own name. The rosters are yours, kept where you keep your settings: the global one in your
 home folder (`~/.claude/crossreview.json`, `${CODDY_HOME:-~/.coddy}/crossreview.json`,
 `${CODEX_HOME:-~/.codex}/...`, `~/.cursor/...`), the local one in your folder of the project
@@ -214,6 +215,5 @@ substitute the quoted paths of the brief and of its output file for `{brief}` an
 `CROSSREVIEW_DEPTH=1 ` in front of the command (`$env:CROSSREVIEW_DEPTH = '1'; ` in PowerShell) so
 the reviewer knows not to start a crossreview of its own, and start it with your own background
 shell tool in an empty directory, each under a time limit; wait for all of them, then continue at
-step 5. A template with `{brief_json}` and `{out_json}` (Antigravity) needs two more steps by hand,
-both in `references/agents.md`: wrap the brief into one JSON line, and take the review out of the
-event stream the CLI prints.
+step 5. Antigravity is the one reviewer that cannot do without Python: its command runs
+`scripts/agy-stream.py`.

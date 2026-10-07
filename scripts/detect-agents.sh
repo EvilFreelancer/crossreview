@@ -7,8 +7,7 @@
 # The agents and their command templates come from agents.tsv next to this
 # script, the same table crossreview.py and detect-agents.ps1 read. The
 # template keeps the {model}, {brief} and {out} placeholders: {model} is filled
-# in when the roster is written, {brief} and {out} (or {brief_json} and
-# {out_json}, for a stream-json CLI) on every run. models_cmd is
+# in when the roster is written, {brief} and {out} on every run. models_cmd is
 # empty when the CLI cannot list its own models (or the listing failed), and
 # the user types the model id instead.
 #
@@ -23,6 +22,8 @@ case $0 in
     *) here=. ;;
 esac
 table="$here/agents.tsv"
+# The same directory as an absolute path, for {scripts}: a reviewer runs elsewhere.
+scripts_dir=$(cd "$here" 2>/dev/null && pwd -P) || scripts_dir=$here
 if [ ! -r "$table" ]; then
     echo "detect-agents.sh: $table is missing" >&2
     exit 1
@@ -121,6 +122,7 @@ while IFS="$tab" read -r agent bins marker models posix pwsh; do
             fi
         fi
         template=$(subst "$posix" '{bin}' "$cand")
+        template=$(subst "$template" '{scripts}' "$scripts_dir")
         printf '%s\t%s\t%s\t%s\n' "$agent" "$path" "$models_cmd" "$template"
         break
     done

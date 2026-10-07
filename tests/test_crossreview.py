@@ -59,8 +59,8 @@ STUB_REVIEWER = textwrap.dedent('''
 ''')
 
 
-# Antigravity's side of the stream-json exchange: one user event in, events out.
-# The model name picks the behaviour.
+# Antigravity's side of the stream-json exchange, with the event shapes agy 1.3.0
+# prints: one user event in, events out. The model name picks the behaviour.
 STUB_AGY = textwrap.dedent('''
     import json, sys, time
     args = sys.argv[1:]
@@ -71,12 +71,14 @@ STUB_AGY = textwrap.dedent('''
         sys.stdout.write(json.dumps(dict({"event": event}, **body)) + "\\n")
         sys.stdout.flush()
     def delta(index, text):
-        emit("step_update", step_update={"step_index": index, "step_type": "agent_response", "text_delta": text})
-    emit("init", conversation_id="c1", init={"model": model})
-    emit("step_update", step_update={"step_index": 0, "step_type": "user_input", "state": "DONE"})
+        emit("step_update", step_update={"conversation_id": "c1", "step_index": index, "state": "ACTIVE",
+                                         "step_type": "agent_response", "text_delta": text})
+    emit("init", conversation_id="c1", init={"model": model, "permission_mode": "request-review"})
+    emit("step_update", step_update={"conversation_id": "c1", "step_index": 0, "state": "DONE",
+                                     "step_type": "user_input"})
     if model == "echo":
         delta(1, content[:4])
-        emit("result", result={"status": "SUCCESS", "response": content})
+        emit("result", result={"conversation_id": "c1", "status": "SUCCESS", "response": content, "num_turns": 1})
     elif model == "quota":
         emit("result", result={"status": "ERROR", "response": "", "error": "RESOURCE_EXHAUSTED: quota exceeded"})
         sys.exit(1)
@@ -86,12 +88,27 @@ STUB_AGY = textwrap.dedent('''
         delta(1, "Let me run a command first.")
         emit("result", result={"status": "SUCCESS", "response": "",
                                "denied_actions": [{"action": "command", "display_name": "RunCommand"}]})
-    elif model == "slow":
+    elif model == "died":
         delta(1, "thinking aloud")
         delta(2, "partial ")
         delta(2, "answer")
+        sys.exit(3)
+    elif model == "slow":
         time.sleep(60)
 ''')
+
+
+def write_agy(bin_dir: Path) -> None:
+    # A stub `agy` in bin_dir: an executable that runs STUB_AGY.
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / "stub_agy.py"
+    stub.write_text(STUB_AGY, encoding="utf-8")
+    if IS_WINDOWS:
+        (bin_dir / "agy.cmd").write_text('@"%s" "%s" %%*\r\n' % (sys.executable, stub), encoding="ascii")
+    else:
+        shim = bin_dir / "agy"
+        shim.write_text('#!/bin/sh\nexec "%s" "%s" "$@"\n' % (sys.executable, stub), encoding="utf-8")
+        shim.chmod(0o755)
 
 
 def write_stub(bin_dir: Path, name: str, version: str = "", help_text: str = "", rc: int = 0,
@@ -174,13 +191,19 @@ class TableTest(unittest.TestCase):
         self.assertIn("cursor", table)
         for spec in table.values():
             for template in (spec.posix, spec.powershell):
-                self.assertIn("{bin}", template, "%s: %s" % (spec.agent, template))
-                for plain, stream in (("{brief}", cr.BRIEF_JSON), ("{out}", cr.OUT_JSON)):
-                    self.assertTrue(plain in template or stream in template, "%s: %s" % (spec.agent, template))
+                for placeholder in ("{bin}", "{brief}", "{out}"):
+                    self.assertIn(placeholder, template, "%s: %s" % (spec.agent, template))
                 if spec.agent != "koda":
                     self.assertIn("{model}", template, spec.agent)
                     self.assertNotIn("$(", template, "%s passes the brief as an argument" % spec.agent)
             self.assertTrue(spec.marker and spec.marker == spec.marker.lower(), spec.agent)
+
+    def test_a_row_that_goes_through_a_script_names_one_that_exists(self):
+        for windows in (False, True):
+            template = cr.load_table()["antigravity"].template(windows)
+            self.assertNotIn("{scripts}", template)
+            self.assertIn('"%s' % cr.HERE, template)
+        self.assertTrue((cr.HERE / "agy-stream.py").is_file())
 
     def test_cursor_prefers_the_agent_alias(self):
         self.assertEqual(cr.load_table()["cursor"].binaries[0], "agent")
@@ -240,32 +263,6 @@ class ModelsParsingTest(unittest.TestCase):
         self.assertEqual(cr.parse_antigravity_models("\x1b[1mgemini-3.1-pro-low\x1b[0m\tGemini 3.1 Pro (Low)\n"),
                          ["gemini-3.1-pro-low"])
 
-    def test_antigravity_stream(self):
-        # Events as agy 1.3.0 printed them, shortened.
-        events = [
-            {"event": "init", "conversation_id": "c2f55968", "init": {"model": "gemini-3.8-flash-low"}},
-            {"event": "step_update", "step_update": {"conversation_id": "c2f55968", "step_index": 0,
-                                                     "state": "DONE", "step_type": "user_input"}},
-            {"event": "step_update", "step_update": {"conversation_id": "c2f55968", "step_index": 1,
-                                                     "state": "ACTIVE", "step_type": "agent_response",
-                                                     "text_delta": "ZEBRA"}},
-            {"event": "step_update", "step_update": {"conversation_id": "c2f55968", "step_index": 1,
-                                                     "state": "DONE", "step_type": "agent_response",
-                                                     "text_delta": "-41\n", "duration_seconds": 3.9}},
-        ]
-        result = {"event": "result", "result": {"conversation_id": "c2f55968", "status": "SUCCESS",
-                                                "response": "ZEBRA-41\n", "num_turns": 1}}
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "r.jsonl"
-            path.write_text("".join(json.dumps(e) + "\n" for e in events) + "not json\n", encoding="utf-8")
-            self.assertEqual(cr.read_stream(path), ("ZEBRA-41\n", "", False))
-            path.write_text("".join(json.dumps(e) + "\n" for e in events + [result]), encoding="utf-8")
-            self.assertEqual(cr.read_stream(path), ("ZEBRA-41\n", "", False))
-            result["result"].update(status="ERROR", response="", error="stream input has no content")
-            path.write_text(json.dumps(result) + "\n", encoding="utf-8")
-            self.assertEqual(cr.read_stream(path), ("", "ERROR: stream input has no content", True))
-            self.assertEqual(cr.read_stream(Path(tmp) / "missing.jsonl"), ("", "", False))
-
     def test_opencode_list(self):
         self.assertEqual(cr.parse_opencode_models("opencode/big-pickle\nrpa/gpt-oss:120b\n\nnoise line\n"),
                          ["opencode/big-pickle", "rpa/gpt-oss:120b"])
@@ -315,7 +312,7 @@ class DetectTest(TempCase):
         found = {d.agent: d for d in cr.detect(cr.load_table())}
         self.assertEqual(sorted(found), ["antigravity", "claude", "codex", "cursor"])
         self.assertEqual(found["antigravity"].models_cmd, "agy models")
-        self.assertIn("< {brief_json} > {out_json}", found["antigravity"].template)
+        self.assertIn("agy-stream.py", found["antigravity"].template)
         self.assertEqual(found["claude"].models_cmd, "")
         self.assertEqual(found["codex"].models_cmd, "codex debug models")
         self.assertEqual(found["cursor"].binary, "cursor-agent")
@@ -323,7 +320,8 @@ class DetectTest(TempCase):
             ("cmd /d /c --% " if IS_WINDOWS else "") + "cursor-agent -p --trust"), found["cursor"].template)
         for d in found.values():
             self.assertNotIn("{bin}", d.template)
-            self.assertIn("{brief", d.template)
+            self.assertNotIn("{scripts}", d.template)
+            self.assertIn("{brief}", d.template)
 
     @unittest.skipIf(IS_WINDOWS, "detect-agents.sh is the POSIX twin")
     def test_shell_detection_matches_python(self):
@@ -353,7 +351,7 @@ class DetectTest(TempCase):
                                  ["antigravity", "claude", "codex", "cursor"], lines)
                 for ln in lines:
                     agent, _, models_cmd, template = ln.split("\t")
-                    self.assertEqual(template, cr.fill(table[agent].powershell, bin={
+                    self.assertEqual(template, cr.fill(table[agent].template(True), bin={
                         "cursor": "cursor-agent", "antigravity": "agy"}.get(agent, agent)))
                     if agent == "codex":
                         self.assertEqual(models_cmd, "codex debug models")
@@ -391,6 +389,26 @@ class PowerShellTemplateTest(TempCase):
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertEqual(out.read_bytes(), payload)
 
+    def test_the_antigravity_adapter_runs_from_a_plain_roster_command(self):
+        bin_dir = self.tmp / "bin dir"
+        write_agy(bin_dir)
+        work = self.tmp / "run dir"
+        work.mkdir()
+        brief = work / "brief.md"
+        payload = "Brief: значение, 値, café\nline two\n".encode("utf-8")
+        brief.write_bytes(payload)
+        env = dict(os.environ, PATH=os.pathsep.join([str(bin_dir), os.environ["PATH"]]))
+        for exe in POWERSHELLS:
+            with self.subTest(powershell=exe):
+                out = work / ("review-%s.md" % Path(exe).stem)
+                command = cr.fill(cr.load_table()["antigravity"].template(True), bin="agy", model="echo",
+                                  brief='"%s"' % brief, out='"%s"' % out)
+                proc = subprocess.run([exe, "-NoProfile", "-Command", self.PROLOGUE + command + self.EPILOGUE],
+                                      env=env, cwd=str(work), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      timeout=120)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(out.read_bytes(), payload)
+
 
 class RosterTest(TempCase):
     def make_repo(self) -> Path:
@@ -425,12 +443,15 @@ class RosterTest(TempCase):
         os.environ["CODDY_HOME"] = str(self.tmp / "coddy-home")
         expected = {"claude": self.home / ".claude", "cursor": self.home / ".cursor", "codex": self.home / ".codex",
                     "coddy": self.tmp / "coddy-home", "kimi": self.home / ".kimi",
-                    "opencode": self.home / ".config" / "opencode", "windsurf": self.home / ".agents"}
+                    "opencode": self.home / ".config" / "opencode", "windsurf": self.home / ".agents",
+                    "antigravity": self.home / ".gemini" / "antigravity-cli"}
         for host, folder in expected.items():
             self.assertEqual(cr.global_roster_path(host), folder / "crossreview.json", host)
         self.assertEqual(cr.local_roster_path("claude", repo), repo / ".claude" / "crossreview.json")
         self.assertEqual(cr.local_roster_path("coddy", repo), repo / ".coddy" / "crossreview.json")
         self.assertEqual(cr.local_roster_path("windsurf", repo), repo / ".agents" / "crossreview.json")
+        self.assertEqual(cr.local_roster_path("antigravity", repo), repo / ".agents" / "crossreview.json")
+        self.assertEqual(cr.resolve_host("agy"), "antigravity")
         os.environ["CODEX_HOME"] = str(self.tmp / "cx")
         self.assertEqual(cr.global_roster_path("codex"), self.tmp / "cx" / "crossreview.json")
         os.environ["CROSSREVIEW_HOME"] = str(self.tmp / "shared")
@@ -977,71 +998,49 @@ class RunTest(TempCase):
         """The table's own antigravity template, with a stub `agy` first on PATH."""
         bin_dir = self.tmp / "agy-bin"
         if not bin_dir.exists():
-            bin_dir.mkdir()
-            stub = bin_dir / "stub_agy.py"
-            stub.write_text(STUB_AGY, encoding="utf-8")
-            if IS_WINDOWS:
-                (bin_dir / "agy.cmd").write_text('@"%s" "%s" %%*\r\n' % (sys.executable, stub), encoding="ascii")
-            else:
-                shim = bin_dir / "agy"
-                shim.write_text('#!/bin/sh\nexec "%s" "%s" "$@"\n' % (sys.executable, stub), encoding="utf-8")
-                shim.chmod(0o755)
+            write_agy(bin_dir)
             os.environ["PATH"] = os.pathsep.join([str(bin_dir), os.environ["PATH"]])
         return cr.fill(cr.load_table()["antigravity"].template(), bin="agy", model=model)
 
-    def test_a_stream_json_reviewer_gets_the_brief_and_leaves_a_review(self):
+    def test_antigravity_gets_the_brief_as_json_and_leaves_a_review(self):
         # Longer than one argument may be anywhere, with line endings and scripts a code page would mangle.
         payload = ("Review this: значение, 値, café\r\nsecond line\n" * 4000).encode("utf-8")
         self.assertGreater(len(payload), 130_000)
         self.brief.write_bytes(payload)
-        roster = self.roster([{"name": "agy", "agent": "antigravity", "command": self.agy_command("echo")}])
+        roster = self.roster([{"name": "agy", "agent": "antigravity", "binary": "agy", "model": "echo",
+                               "command": self.agy_command("echo")}])
         rc, out, status, run_dir = self.run_and_wait(roster)
         self.assertEqual(rc, 0, out)
         self.assertEqual(status["reviewers"][0]["status"], "done", out)
         self.assertEqual((run_dir / "reviews" / "agy.md").read_bytes(), payload)
-        self.assertIn(b'"event": "result"', (run_dir / "reviews" / "agy.jsonl").read_bytes())
-        line = (run_dir / "brief.stream.json").read_bytes()
-        self.assertTrue(all(b < 128 for b in line) and line.endswith(b"\n") and line.count(b"\n") == 1, line[:80])
-        self.assertEqual(json.loads(line.decode("ascii")),
-                         {"event": "user", "message": {"content": payload.decode("utf-8")}})
+        self.assertIn("conversation c1", (run_dir / "reviews" / "agy.err").read_text(encoding="utf-8"))
         rc, listed, _ = self.helper("roster", "--roster", roster)
         self.assertNotIn("warning", listed)
-        mixed = self.roster([{"name": "agy", "command": self.agy_command("echo").replace("{out_json}", "{out}")}])
-        rc, listed, _ = self.helper("roster", "--roster", mixed)
-        self.assertIn("belong together", listed)
 
-    def test_a_stream_json_reviewer_that_fails_says_why(self):
-        roster = self.roster([{"name": "quota", "command": self.agy_command("quota")},
-                              {"name": "cut-off", "command": self.agy_command("cut-off")},
-                              {"name": "denied", "command": self.agy_command("denied")},
-                              {"name": "slow", "command": self.agy_command("slow"), "timeout": 3}])
+    def test_antigravity_failures_say_why(self):
+        roster = self.roster([{"name": name, "command": self.agy_command(name)}
+                              for name in ("quota", "cut-off", "denied", "died")]
+                             + [{"name": "slow", "command": self.agy_command("slow"), "timeout": 3}])
         rc, out, status, run_dir = self.run_and_wait(roster)
         self.assertEqual(rc, 0, out)
         by_name = {r["name"]: r for r in status["reviewers"]}
         self.assertEqual((by_name["quota"]["status"], by_name["quota"]["note"]), ("failed", "usage or rate limit"))
-        # An error the CLI reports is a failure even with exit code 0, and what it wrote is kept.
-        self.assertEqual((by_name["cut-off"]["status"], by_name["cut-off"]["rc"]), ("failed", 0))
+        # An error the CLI reports is a failure even when it exits 0, and what it wrote is kept.
+        self.assertEqual(by_name["cut-off"]["status"], "failed")
         self.assertIn("turn aborted", by_name["cut-off"]["note"])
         self.assertEqual((run_dir / "reviews" / "cut-off.md").read_text(encoding="utf-8"), "1. high: half a review")
         self.assertEqual(by_name["denied"]["status"], "empty")
         self.assertIn("denied tool calls: RunCommand", by_name["denied"]["note"])
+        self.assertEqual((by_name["died"]["status"], by_name["died"]["rc"]), ("failed", 3))
+        self.assertEqual((run_dir / "reviews" / "died.md").read_text(encoding="utf-8"), "partial answer")
         self.assertEqual(by_name["slow"]["status"], "timeout")
-        self.assertEqual((run_dir / "reviews" / "slow.md").read_text(encoding="utf-8"), "partial answer")
-        rc, _, err = self.helper("retry", run_dir, "quota")
-        self.assertEqual(rc, 0, err)
-        rc, out, _ = self.helper("wait", run_dir, "--max", "60")
-        self.assertEqual(rc, 0, out)
-        self.assertTrue((run_dir / "reviews" / "quota.attempt1.jsonl").exists())
 
-    def test_a_stream_json_reviewer_refuses_a_brief_that_is_not_utf8(self):
+    def test_antigravity_refuses_a_brief_that_is_not_utf8(self):
         self.brief.write_bytes("Review this: значение\n".encode("cp1251"))
-        roster = self.roster([{"name": "agy", "command": self.agy_command("echo")},
-                              {"name": "good", "command": self.command("ok")}])
+        roster = self.roster([{"name": "agy", "command": self.agy_command("echo")}])
         rc, out, status, _ = self.run_and_wait(roster)
-        by_name = {r["name"]: r for r in status["reviewers"]}
-        self.assertEqual(by_name["agy"]["status"], "failed", out)
-        self.assertIn("UTF-8", by_name["agy"]["note"])
-        self.assertEqual(by_name["good"]["status"], "done")
+        self.assertEqual(status["reviewers"][0]["status"], "failed", out)
+        self.assertIn("UTF-8", status["reviewers"][0]["note"])
 
     def test_one_off_reviewers_and_unknown_names(self):
         roster = self.roster([{"name": "good", "command": self.command("ok")}])
