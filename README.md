@@ -76,6 +76,10 @@ everywhere else.
 codex plugin marketplace add EvilFreelancer/rpa-skills
 ```
 
+**In Coddy**: nothing to install. The skill ships in the standard delivery of [Coddy](https://coddy.dev):
+the first run writes it into `~/.coddy/skills/crossreview/`, `/crossreview` works right away, and `coddy update`
+brings a newer version of the skill with each release.
+
 **Any agent, as a skill folder.** Clone the repository once and link it into every agent you use;
 the directory name has to match the `name` field in `SKILL.md`:
 
