@@ -61,6 +61,7 @@ which of the two to write:
 | `opencode` | `${XDG_CONFIG_HOME:-~/.config}/opencode/crossreview.json` | `.opencode/crossreview.json` |
 | `devin` | `${XDG_CONFIG_HOME:-~/.config}/devin/crossreview.json` | `.devin/crossreview.json` |
 | `gemini`, `qwen`, `kimi` | `~/.gemini/...`, `~/.qwen/...`, `~/.kimi/...` | `.gemini/...`, `.qwen/...`, `.kimi/...` |
+| `antigravity` | `~/.gemini/antigravity-cli/crossreview.json` | `.agents/crossreview.json` |
 | anything else | `~/.agents/crossreview.json` | `.agents/crossreview.json` |
 
 `~` is the user's home, `%USERPROFILE%` on Windows. The Coddy rows are where the first version of

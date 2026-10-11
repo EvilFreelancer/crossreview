@@ -78,7 +78,7 @@ foreach ($raw in Get-Content -LiteralPath $table -Encoding UTF8) {
             $r = Invoke-Probe $path ($fixed + $models.Split(' ')) 20
             if ($r.Ok) { $modelsCmd = "$cand $models" }
         }
-        Write-Output ($agent + "`t" + $path + "`t" + $modelsCmd + "`t" + $pwsh.Replace('{bin}', $cand))
+        Write-Output ($agent + "`t" + $path + "`t" + $modelsCmd + "`t" + $pwsh.Replace('{bin}', $cand).Replace('{scripts}', $PSScriptRoot))
         break
     }
 }

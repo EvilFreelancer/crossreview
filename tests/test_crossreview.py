@@ -59,6 +59,62 @@ STUB_REVIEWER = textwrap.dedent('''
 ''')
 
 
+# Antigravity's side of the stream-json exchange, with the event shapes agy 1.3.0
+# prints: one user event in, events out. The model name picks the behaviour.
+STUB_AGY = textwrap.dedent('''
+    import json, sys, time
+    args = sys.argv[1:]
+    model = args[args.index("--model") + 1]
+    assert "-p=" in args and args[args.index("--input-format") + 1] == "stream-json", args
+    content = json.loads(sys.stdin.buffer.readline().decode("ascii"))["message"]["content"]
+    def emit(event, **body):
+        sys.stdout.write(json.dumps(dict({"event": event}, **body)) + "\\n")
+        sys.stdout.flush()
+    def delta(index, text):
+        emit("step_update", step_update={"conversation_id": "c1", "step_index": index, "state": "ACTIVE",
+                                         "step_type": "agent_response", "text_delta": text})
+    emit("init", conversation_id="c1", init={"model": model, "permission_mode": "request-review"})
+    emit("step_update", step_update={"conversation_id": "c1", "step_index": 0, "state": "DONE",
+                                     "step_type": "user_input"})
+    if model == "echo":
+        delta(1, content[:4])
+        emit("result", result={"conversation_id": "c1", "status": "SUCCESS", "response": content, "num_turns": 1})
+    elif model == "quota":
+        emit("result", result={"status": "ERROR", "response": "", "error": "RESOURCE_EXHAUSTED: quota exceeded"})
+        sys.exit(1)
+    elif model == "cut-off":
+        emit("result", result={"status": "ERROR", "response": "1. high: half a review", "error": "turn aborted"})
+    elif model == "aborted":
+        delta(1, "1. medium: half a")
+        delta(1, " finding")
+        emit("result", result={"status": "ERROR", "response": "", "error": "turn aborted"})
+    elif model == "denied":
+        delta(1, "Let me run a command first.")
+        emit("result", result={"status": "SUCCESS", "response": "",
+                               "denied_actions": [{"action": "command", "display_name": "RunCommand"}]})
+    elif model == "died":
+        delta(1, "thinking aloud")
+        delta(2, "partial ")
+        delta(2, "answer")
+        sys.exit(3)
+    elif model == "slow":
+        time.sleep(60)
+''')
+
+
+def write_agy(bin_dir: Path) -> None:
+    # A stub `agy` in bin_dir: an executable that runs STUB_AGY.
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / "stub_agy.py"
+    stub.write_text(STUB_AGY, encoding="utf-8")
+    if IS_WINDOWS:
+        (bin_dir / "agy.cmd").write_text('@"%s" "%s" %%*\r\n' % (sys.executable, stub), encoding="ascii")
+    else:
+        shim = bin_dir / "agy"
+        shim.write_text('#!/bin/sh\nexec "%s" "%s" "$@"\n' % (sys.executable, stub), encoding="utf-8")
+        shim.chmod(0o755)
+
+
 def write_stub(bin_dir: Path, name: str, version: str = "", help_text: str = "", rc: int = 0,
                models: str = "", models_out: str = "") -> None:
     """An executable that prints `version` for --version and `help_text` for --help."""
@@ -146,6 +202,14 @@ class TableTest(unittest.TestCase):
                     self.assertNotIn("$(", template, "%s passes the brief as an argument" % spec.agent)
             self.assertTrue(spec.marker and spec.marker == spec.marker.lower(), spec.agent)
 
+    def test_a_row_that_goes_through_a_script_names_one_that_exists(self):
+        for windows in (False, True):
+            template = cr.load_table()["antigravity"].template(windows)
+            self.assertNotIn("{scripts}", template)
+            # Quoted whole: a shell must not split the path, nor expand anything in it on POSIX.
+            self.assertIn(('"%s\\agy-stream.py"' if windows else "'%s/agy-stream.py'") % cr.HERE, template)
+        self.assertTrue((cr.HERE / "agy-stream.py").is_file())
+
     def test_cursor_prefers_the_agent_alias(self):
         self.assertEqual(cr.load_table()["cursor"].binaries[0], "agent")
 
@@ -196,6 +260,14 @@ class ModelsParsingTest(unittest.TestCase):
                 "  swe-2-medium                       SWE-2 Medium  [262K context, Free]\n")
         self.assertEqual(cr.parse_devin_models(text), ["swe-2-high", "swe-2-medium"])
 
+    def test_antigravity_list(self):
+        text = ("Fetching available models...\n\x1b[Kgemini-3.8-flash-high\tGemini 3.8 Flash (High)\r\n"
+                "claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\ngpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n")
+        self.assertEqual(cr.parse_antigravity_models(text),
+                         ["gemini-3.8-flash-high", "claude-sonnet-4-6", "gpt-oss-120b-medium"])
+        self.assertEqual(cr.parse_antigravity_models("\x1b[1mgemini-3.1-pro-low\x1b[0m\tGemini 3.1 Pro (Low)\n"),
+                         ["gemini-3.1-pro-low"])
+
     def test_opencode_list(self):
         self.assertEqual(cr.parse_opencode_models("opencode/big-pickle\nrpa/gpt-oss:120b\n\nnoise line\n"),
                          ["opencode/big-pickle", "rpa/gpt-oss:120b"])
@@ -237,12 +309,15 @@ class DetectTest(TempCase):
         write_stub(bin_dir, "devin", rc=1)                                  # on PATH, but not the agent
         write_stub(bin_dir, "agent", version="1.0", help_text="some other tool")  # unrelated `agent`
         write_stub(bin_dir, "cursor-agent", version="2026.10.01", help_text="Start the Cursor Agent")
+        write_stub(bin_dir, "agy", version="1.3.0", help_text="Usage of agy:", models="models", models_out="m1")
         return os.pathsep.join([str(bin_dir), tools_path(self.tmp)])
 
     def test_python_detection(self):
         os.environ["PATH"] = self.stub_path()
         found = {d.agent: d for d in cr.detect(cr.load_table())}
-        self.assertEqual(sorted(found), ["claude", "codex", "cursor"])
+        self.assertEqual(sorted(found), ["antigravity", "claude", "codex", "cursor"])
+        self.assertEqual(found["antigravity"].models_cmd, "agy models")
+        self.assertIn("agy-stream.py", found["antigravity"].template)
         self.assertEqual(found["claude"].models_cmd, "")
         self.assertEqual(found["codex"].models_cmd, "codex debug models")
         self.assertEqual(found["cursor"].binary, "cursor-agent")
@@ -250,6 +325,7 @@ class DetectTest(TempCase):
             ("cmd /d /c --% " if IS_WINDOWS else "") + "cursor-agent -p --trust"), found["cursor"].template)
         for d in found.values():
             self.assertNotIn("{bin}", d.template)
+            self.assertNotIn("{scripts}", d.template)
             self.assertIn("{brief}", d.template)
 
     @unittest.skipIf(IS_WINDOWS, "detect-agents.sh is the POSIX twin")
@@ -262,7 +338,7 @@ class DetectTest(TempCase):
         rc, out, err = self.helper("detect", env=env)
         self.assertEqual(rc, 0, err)
         self.assertEqual(sh.stdout.decode(), out)
-        self.assertEqual(len(out.strip().splitlines()), 3)
+        self.assertEqual(len(out.strip().splitlines()), 4)
 
     @unittest.skipUnless(POWERSHELLS, "no PowerShell")
     def test_powershell_detection_matches_python(self):
@@ -276,11 +352,12 @@ class DetectTest(TempCase):
                                     stderr=subprocess.PIPE, timeout=180)
                 self.assertEqual(ps.returncode, 0, ps.stderr)
                 lines = sorted(ps.stdout.decode().strip().splitlines())
-                self.assertEqual([ln.split("\t")[0] for ln in lines], ["claude", "codex", "cursor"], lines)
+                self.assertEqual([ln.split("\t")[0] for ln in lines],
+                                 ["antigravity", "claude", "codex", "cursor"], lines)
                 for ln in lines:
                     agent, _, models_cmd, template = ln.split("\t")
-                    self.assertEqual(template, cr.fill(table[agent].powershell,
-                                                       bin="cursor-agent" if agent == "cursor" else agent))
+                    self.assertEqual(template, cr.fill(table[agent].template(True), bin={
+                        "cursor": "cursor-agent", "antigravity": "agy"}.get(agent, agent)))
                     if agent == "codex":
                         self.assertEqual(models_cmd, "codex debug models")
 
@@ -314,6 +391,26 @@ class PowerShellTemplateTest(TempCase):
                                   brief='"%s"' % brief, out='"%s"' % out)
                 proc = subprocess.run([exe, "-NoProfile", "-Command", self.PROLOGUE + command + self.EPILOGUE],
                                       env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(out.read_bytes(), payload)
+
+    def test_the_antigravity_adapter_runs_from_a_plain_roster_command(self):
+        bin_dir = self.tmp / "bin dir"
+        write_agy(bin_dir)
+        work = self.tmp / "run dir"
+        work.mkdir()
+        brief = work / "brief.md"
+        payload = "Brief: значение, 値, café\nline two\n".encode("utf-8")
+        brief.write_bytes(payload)
+        env = dict(os.environ, PATH=os.pathsep.join([str(bin_dir), os.environ["PATH"]]))
+        for exe in POWERSHELLS:
+            with self.subTest(powershell=exe):
+                out = work / ("review-%s.md" % Path(exe).stem)
+                command = cr.fill(cr.load_table()["antigravity"].template(True), bin="agy", model="echo",
+                                  brief='"%s"' % brief, out='"%s"' % out)
+                proc = subprocess.run([exe, "-NoProfile", "-Command", self.PROLOGUE + command + self.EPILOGUE],
+                                      env=env, cwd=str(work), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      timeout=120)
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertEqual(out.read_bytes(), payload)
 
@@ -351,12 +448,15 @@ class RosterTest(TempCase):
         os.environ["CODDY_HOME"] = str(self.tmp / "coddy-home")
         expected = {"claude": self.home / ".claude", "cursor": self.home / ".cursor", "codex": self.home / ".codex",
                     "coddy": self.tmp / "coddy-home", "kimi": self.home / ".kimi",
-                    "opencode": self.home / ".config" / "opencode", "windsurf": self.home / ".agents"}
+                    "opencode": self.home / ".config" / "opencode", "windsurf": self.home / ".agents",
+                    "antigravity": self.home / ".gemini" / "antigravity-cli"}
         for host, folder in expected.items():
             self.assertEqual(cr.global_roster_path(host), folder / "crossreview.json", host)
         self.assertEqual(cr.local_roster_path("claude", repo), repo / ".claude" / "crossreview.json")
         self.assertEqual(cr.local_roster_path("coddy", repo), repo / ".coddy" / "crossreview.json")
         self.assertEqual(cr.local_roster_path("windsurf", repo), repo / ".agents" / "crossreview.json")
+        self.assertEqual(cr.local_roster_path("antigravity", repo), repo / ".agents" / "crossreview.json")
+        self.assertEqual(cr.resolve_host("agy"), "antigravity")
         os.environ["CODEX_HOME"] = str(self.tmp / "cx")
         self.assertEqual(cr.global_roster_path("codex"), self.tmp / "cx" / "crossreview.json")
         os.environ["CROSSREVIEW_HOME"] = str(self.tmp / "shared")
@@ -898,6 +998,95 @@ class RunTest(TempCase):
         self.assertEqual((run_dir / "reviews" / "shim.md").read_bytes(), self.brief.read_bytes())
         self.assertEqual(by_name["shim-arg"]["status"], "failed")
         self.assertIn("batch file", by_name["shim-arg"]["note"])
+
+    def agy_command(self, model: str) -> str:
+        """The table's own antigravity template, with a stub `agy` first on PATH."""
+        bin_dir = self.tmp / "agy-bin"
+        if not bin_dir.exists():
+            write_agy(bin_dir)
+            os.environ["PATH"] = os.pathsep.join([str(bin_dir), os.environ["PATH"]])
+        return cr.fill(cr.load_table()["antigravity"].template(), bin="agy", model=model)
+
+    def test_antigravity_gets_the_brief_as_json_and_leaves_a_review(self):
+        # Longer than one argument may be anywhere, with line endings and scripts a code page would mangle.
+        payload = ("Review this: значение, 値, café\r\nsecond line\n" * 4000).encode("utf-8")
+        self.assertGreater(len(payload), 130_000)
+        self.brief.write_bytes(payload)
+        roster = self.roster([{"name": "agy", "agent": "antigravity", "binary": "agy", "model": "echo",
+                               "command": self.agy_command("echo")}])
+        rc, out, status, run_dir = self.run_and_wait(roster)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(status["reviewers"][0]["status"], "done", out)
+        self.assertEqual((run_dir / "reviews" / "agy.md").read_bytes(), payload)
+        self.assertIn("conversation c1", (run_dir / "reviews" / "agy.err").read_text(encoding="utf-8"))
+        rc, listed, _ = self.helper("roster", "--roster", roster)
+        self.assertNotIn("warning", listed)
+
+    def test_antigravity_failures_say_why(self):
+        roster = self.roster([{"name": name, "command": self.agy_command(name)}
+                              for name in ("quota", "cut-off", "aborted", "denied", "died")]
+                             + [{"name": "slow", "command": self.agy_command("slow"), "timeout": 3}])
+        rc, out, status, run_dir = self.run_and_wait(roster)
+        self.assertEqual(rc, 0, out)
+        by_name = {r["name"]: r for r in status["reviewers"]}
+        self.assertEqual((by_name["quota"]["status"], by_name["quota"]["note"]), ("failed", "usage or rate limit"))
+        # An error the CLI reports is a failure even when it exits 0, and what it wrote is kept.
+        self.assertEqual(by_name["cut-off"]["status"], "failed")
+        self.assertIn("turn aborted", by_name["cut-off"]["note"])
+        self.assertEqual((run_dir / "reviews" / "cut-off.md").read_text(encoding="utf-8"), "1. high: half a review")
+        self.assertEqual(by_name["aborted"]["status"], "failed")
+        self.assertEqual((run_dir / "reviews" / "aborted.md").read_text(encoding="utf-8"), "1. medium: half a finding")
+        # A turn that ended well with nothing to say is empty: what it said before a tool call is not a review.
+        self.assertEqual((by_name["denied"]["status"], by_name["denied"]["bytes"]), ("empty", 0))
+        self.assertIn("denied tool calls: RunCommand", by_name["denied"]["note"])
+        self.assertEqual((by_name["died"]["status"], by_name["died"]["rc"]), ("failed", 3))
+        self.assertEqual((run_dir / "reviews" / "died.md").read_text(encoding="utf-8"), "partial answer")
+        self.assertEqual(by_name["slow"]["status"], "timeout")
+        # The id that recovers the answer is on stderr before the CLI is done, so a timeout keeps it.
+        self.assertIn("conversation c1", (run_dir / "reviews" / "slow.err").read_text(encoding="utf-8"))
+
+    def test_antigravity_events_as_the_cli_prints_them(self):
+        # Lines captured from agy 1.3.0 on Windows; the tools list is shortened.
+        lines = [
+            b'{"event":"init","conversation_id":"1342d87c-b01f-4111-bf5b-5111a2c47fd7","init":{"model":'
+            b'"gemini-3.8-flash-low","cwd":"C:\\\\Temp\\\\x","tools":["ask_permission","view_file"],'
+            b'"permission_mode":"request-review"}}',
+            b'{"event":"step_update","step_update":{"conversation_id":"1342d87c-b01f-4111-bf5b-5111a2c47fd7",'
+            b'"step_index":0,"state":"DONE","step_type":"user_input"}}',
+            b'{"event":"step_update","step_update":{"conversation_id":"1342d87c-b01f-4111-bf5b-5111a2c47fd7",'
+            b'"step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"ZEBRA"}}',
+            b'{"event":"step_update","step_update":{"conversation_id":"1342d87c-b01f-4111-bf5b-5111a2c47fd7",'
+            b'"step_index":1,"state":"DONE","step_type":"agent_response","text_delta":"-41\\n",'
+            b'"duration_seconds":3.9463424,"usage":{"input_tokens":22909,"output_tokens":5}}}',
+            b'warning: not an event',
+        ]
+        result = (b'{"event":"result","result":{"conversation_id":"1342d87c-b01f-4111-bf5b-5111a2c47fd7",'
+                  b'"status":"SUCCESS","response":"ZEBRA-41\\n","duration_seconds":20.2981523,"num_turns":1}}')
+        denied = (b'{"event":"result","result":{"conversation_id":"0aea5905","status":"SUCCESS","response":"",'
+                  b'"num_turns":1,"denied_actions":[{"action":"command","display_name":"RunCommand"}]}}')
+        import contextlib
+        import importlib.util
+        import io
+        spec = importlib.util.spec_from_file_location("agy_stream", str(SCRIPTS / "agy-stream.py"))
+        agy = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(agy)
+        said = io.StringIO()
+        with contextlib.redirect_stderr(said):
+            self.assertEqual(agy.read_events(lines), (None, "ZEBRA-41\n"))
+            found, _ = agy.read_events(lines + [result])
+            self.assertEqual((found["status"], found["response"]), ("SUCCESS", "ZEBRA-41\n"))
+            found, _ = agy.read_events([denied])
+            self.assertEqual(found["denied_actions"][0]["display_name"], "RunCommand")
+        self.assertIn("conversation 1342d87c-b01f-4111-bf5b-5111a2c47fd7", said.getvalue())
+        self.assertEqual(json.loads(agy.message("значение\r\n").decode("ascii")),
+                         {"event": "user", "message": {"content": "значение\r\n"}})
+
+    def test_antigravity_refuses_a_brief_that_is_not_utf8(self):
+        self.brief.write_bytes("Review this: значение\n".encode("cp1251"))
+        roster = self.roster([{"name": "agy", "command": self.agy_command("echo")}])
+        rc, out, status, _ = self.run_and_wait(roster)
+        self.assertEqual(status["reviewers"][0]["status"], "failed", out)
+        self.assertIn("UTF-8", status["reviewers"][0]["note"])
 
     def test_one_off_reviewers_and_unknown_names(self):
         roster = self.roster([{"name": "good", "command": self.command("ok")}])

@@ -22,6 +22,8 @@ case $0 in
     *) here=. ;;
 esac
 table="$here/agents.tsv"
+# The same directory as an absolute path, for {scripts}: a reviewer runs elsewhere.
+scripts_dir=$(cd "$here" 2>/dev/null && pwd -P) || scripts_dir=$here
 if [ ! -r "$table" ]; then
     echo "detect-agents.sh: $table is missing" >&2
     exit 1
@@ -120,6 +122,7 @@ while IFS="$tab" read -r agent bins marker models posix pwsh; do
             fi
         fi
         template=$(subst "$posix" '{bin}' "$cand")
+        template=$(subst "$template" '{scripts}' "$scripts_dir")
         printf '%s\t%s\t%s\t%s\n' "$agent" "$path" "$models_cmd" "$template"
         break
     done

@@ -3,7 +3,8 @@
 Every reviewer is a console code agent run once, non-interactively, on the brief. The templates
 live in `scripts/agents.tsv`, the single table the helper and both detection scripts read; this page
 explains them. `{bin}` is the detected binary, `{model}` is written into the roster, `{brief}` and
-`{out}` are filled in for every run.
+`{out}` are filled in for every run. `{scripts}` is the directory of the table, filled in with
+`{bin}`, for a row that goes through an adapter script kept there (see Antigravity below).
 
 Rules every template follows, and why:
 
@@ -153,6 +154,45 @@ kimi --quiet --plan -m {model} < {brief} > {out}
   (every action approved), so `--plan` and the empty `work` directory are what keep it harmless.
 - Stdin is read as the prompt in print mode (checked).
 - Unverified (1.30.0 installed, the key on this machine is rejected with 401).
+
+## antigravity (Antigravity CLI)
+
+```
+python3 '{scripts}/agy-stream.py' {bin} {model} < {brief} > {out}
+```
+
+- In print mode `agy` takes the prompt only as the value of `-p`, an argument, and does not read
+  plain text from stdin. Its stream-json input has no such limit, so the command goes through an
+  adapter, `scripts/agy-stream.py`: it reads the brief from stdin, sends it to
+  `agy --model {model} --mode plan --input-format stream-json --output-format stream-json -p=` as
+  the one JSON line that input expects (`{"event":"user","message":{"content":"<the brief>"}}`,
+  ASCII only), and prints the `response` of the `result` event the CLI answers with. `-p=` with an
+  empty value is required: a bare `-p` takes the next flag as the prompt.
+- The command stays a plain `< {brief} > {out}` line, so the helper, Coddy's coordinator and a
+  shell run it alike. The price: it needs Python (`python3`, `python` on Windows; where `python` is
+  the Microsoft Store alias, write `py -3` into the stored command), and the roster holds the
+  absolute path of the script, so a roster moved to another machine or another agent's copy of
+  the skill wants `init --import <file> --refresh`. The path is quoted whole, in single quotes on
+  POSIX so a shell expands nothing in it; a skill directory with a `'` in its path there, or a
+  `%NAME%` on Windows, is not supported.
+- A `result` whose status is not `SUCCESS` ends the adapter with a non-zero exit code, whatever
+  the CLI's own, so the reviewer is `failed`; what the result carried, or failing that what the
+  CLI had streamed, is still printed. The status,
+  the error and the tool calls the result lists as denied go to stderr (`reviews/<name>.err`). A
+  brief that is not UTF-8 is refused: JSON carries nothing else.
+- **Not read-only** in print mode: `--mode plan` did not stop a file write, inside or outside the
+  working directory, when the prompt asked for one (checked on 1.3.0). Shell commands are denied,
+  because print mode cannot ask for the permission. So this reviewer rests on the brief's tool ban
+  and the empty `work` directory. Do not add `--disable-slash-commands`: the CLI warns that
+  `--mode plan` has no effect with it.
+- Every run is a conversation in the user's Antigravity history. Nothing arrives from the CLI
+  while the model thinks, so a quiet reviewer is not a hung one.
+- Models: `agy models` prints `id<TAB>name`, reasoning levels included in the id
+  (`gemini-3.8-flash-high`, `gemini-3.1-pro-low`).
+- Verified on 1.3.0 (Windows): `gemini-3.8-flash-low` reviewed a 5 KB brief in 32 s.
+- Recover: the adapter writes `agy-stream: conversation <id>` to `reviews/<name>.err` as soon as
+  the CLI reports it, before the model answers, so a reviewer that timed out has left it;
+  `agy --conversation <id> --mode plan -p="Do not call tools. Write your final review now."`.
 
 ## koda
 

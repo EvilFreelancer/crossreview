@@ -78,7 +78,9 @@ class AgentSpec:
         self.powershell = powershell
 
     def template(self, windows=IS_WINDOWS):
-        return self.powershell if windows else self.posix
+        """The command template of this system; {scripts}, the directory of the
+        table, is known here and filled in, the rest by whoever detects and runs."""
+        return (self.powershell if windows else self.posix).replace("{scripts}", str(HERE))
 
 
 def load_table(path=TABLE_PATH) -> Dict[str, AgentSpec]:
@@ -303,6 +305,21 @@ def parse_opencode_models(text: str) -> List[str]:
     return [ln.strip() for ln in text.splitlines() if re.match(r"^\S+/\S+$", ln.strip())]
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def parse_antigravity_models(text: str) -> List[str]:
+    """`agy models`: one `id<TAB>display name` per line, after a progress line."""
+    out = []
+    # A colour code sits inside a line; anything else (erase, cursor) ends what a spinner wrote.
+    text = _ANSI.sub(lambda m: "" if m.group(0).endswith("m") else "\n", text)
+    for line in re.split(r"[\r\n]+", text):
+        match = re.match(r"^([A-Za-z0-9][\w.\-:/@+]*)\t\S", line)
+        if match:
+            out.append(match.group(1))
+    return out
+
+
 def coddy_config_path() -> Path:
     if os.environ.get("CODDY_CONFIG"):
         return Path(os.environ["CODDY_CONFIG"]).expanduser()
@@ -352,7 +369,8 @@ def list_models(agent: str, binary: Optional[str] = None) -> Tuple[List[str], st
         return [], "failed: `%s %s` (%s): %s" % (cand, spec.models, "timeout" if rc is None else "rc=%s" % rc,
                                                 text.strip()[-300:])
     parser = {"codex": parse_codex_models, "cursor": parse_cursor_models,
-              "devin": parse_devin_models, "opencode": parse_opencode_models}.get(agent)
+              "devin": parse_devin_models, "opencode": parse_opencode_models,
+              "antigravity": parse_antigravity_models}.get(agent)
     if parser is None:
         return [ln.strip() for ln in text.splitlines() if ln.strip()], "raw output of %s %s" % (cand, spec.models)
     try:
@@ -386,10 +404,13 @@ HOSTS = {
     "gemini": (None, "~/.gemini", ".gemini"),
     "qwen": (None, "~/.qwen", ".qwen"),
     "kimi": (None, "~/.kimi", ".kimi"),
+    # Antigravity keeps its settings.json there, and a project's customizations in .agents.
+    "antigravity": (None, "~/.gemini/antigravity-cli", ".agents"),
 }
 OTHER_HOST = (None, "~/.agents", ".agents")
 HOST_ALIASES = {"claude-code": "claude", "claudecode": "claude", "cursor-agent": "cursor", "agent": "cursor",
-                "codex-cli": "codex", "qwen-code": "qwen", "gemini-cli": "gemini", "kimi-cli": "kimi"}
+                "codex-cli": "codex", "qwen-code": "qwen", "gemini-cli": "gemini", "kimi-cli": "kimi",
+                "agy": "antigravity", "antigravity-cli": "antigravity"}
 ROSTER_FILE = "crossreview.json"
 TRUST_FILE = "crossreview-trust.json"
 SCOPES = ("local", "global")
