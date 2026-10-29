@@ -11,7 +11,7 @@ description: >
   asks which agents and which of their models to use, and keeps the reviewer roster either for
   the project (in the agent's folder of the repository) or for all projects (in the agent's home).
 metadata:
-  version: 2.0.0
+  version: 2.0.1
   author: Pavel Rykov <paul@drteam.rocks>
   homepage: https://github.com/EvilFreelancer/crossreview
 ---
@@ -66,7 +66,8 @@ the brief directly and do not start another crossreview.
 ## 1. Reviewers
 
 Reviewers named in the request ("crossreview with cursor auto and coddy on codex/gpt-5.6-sol")
-are a one-off list: pass each as `--reviewer agent:model` to the run and leave the roster alone.
+are a one-off list: apply the Coddy rule below, pass each as `--reviewer <spec>` to the run and
+leave the roster alone.
 
 Otherwise run `crossreview.py roster --host <you>`: it takes your local roster of this project when
 there is one, else your global one, and you act on its exit code:
@@ -79,6 +80,13 @@ there is one, else your global one, and you act on its exit code:
   the `crossreview.py trust ...` line it printed. On a no, use `--scope global` from then on.
 - **2**: no roster. Set one up.
 
+**Coddy models default to subagents when you are Coddy.** Keep the helper's CLI detection and
+model listing unchanged. After the user chooses models through Coddy, write each as
+`internal/coddy:<model>`, not `coddy:<model>`, in `init` and one-off `--reviewer` specs. Run these
+reviewers with `spawn_agent`, `agent: "explore"`, and their selected model. Use the Coddy CLI only
+when the user explicitly asks for it or when you are another host, which cannot start Coddy's
+subagents. Do not rewrite an existing roster just by reading it.
+
 Setup, also whenever the user invokes `/crossreview:setup`, even if a roster exists:
 
 1. `crossreview.py detect` prints one line per installed reviewer CLI. Offer only those.
@@ -86,21 +94,27 @@ Setup, also whenever the user invokes `/crossreview:setup`, even if a roster exi
    plain text, then end the turn and wait. Never choose for the user.
 3. For each chosen agent run `crossreview.py models <agent>` and offer the ids it prints
    (multiple choice); when it prints none, ask for the id as free text. Each (agent, model) pair
-   is one reviewer.
+   is one reviewer. When you are Coddy, turn its selected models into `internal/coddy:<model>`
+   specs by default; selecting Coddy does not itself request a separate CLI process.
 4. Ask where to keep the roster: **local**, for this project only, in your folder of it (commit
    the file to give the team the same reviewers; each teammate approves it once), or **global**,
    for all of your projects, in your home folder.
-5. `crossreview.py init --host <you> --scope local|global <agent:model>...` writes it (`--force`
+5. `crossreview.py init --host <you> --scope local|global <spec>...` writes it (`--force`
    over an existing one, `--add` to extend it, `--import <file>` to start from the reviewers
    another agent already has). `--min-reviewers N` raises the quorum, `--timeout S` the time each
-   reviewer gets. A local roster written this way counts as approved.
-6. `crossreview.py probe --host <you>` sends every reviewer a one-word brief. Report each failure
-   with the reason it gives (not signed in, usage limit, unknown model) and offer to drop or fix
-   the entry.
+   reviewer gets. A local roster written this way counts as approved. For example, inside Coddy:
+   `crossreview.py init --host coddy --scope global internal/coddy:devin/swe-2 cursor:auto`.
+6. `crossreview.py probe --host <you>` checks the CLI reviewers; it skips internal reviewers.
+   Check each internal reviewer of yours through a read-only subagent on its selected model:
+   ask it to call no tools and reply with exactly `pong`. In Coddy use `spawn_agent` with
+   `agent: "explore"`. Collect every answer; a skipped entry is not a successful probe. Report
+   failures (not signed in, usage limit, unknown model, timeout) and offer to drop or fix the
+   entry. An internal reviewer belonging to another host remains untested, not passed.
 
 An internal reviewer is a subagent of a host agent on another model, written
-`internal/<host>:<model>` (`internal/claude:sonnet`, `internal/coddy:devin/swe-2`). Only the host
-it names runs it, read-only; other hosts skip it.
+`internal/<host>:<model>` (`internal/claude:sonnet`, `internal/coddy:devin/swe-2`). This is the
+default for Coddy's own models inside Coddy, and an explicit choice elsewhere. Only the host it
+names runs it, read-only; other hosts skip it.
 
 ## 2. Brief
 
@@ -167,7 +181,8 @@ When the run has finished, look at every reviewer that did not answer:
 
 `run` marks the internal reviewers that belong to you as `host`: start one read-only subagent
 per entry on its model while the CLIs run, with the brief file as its whole prompt, and write each
-answer to the path the status names.
+answer to the path the status names. In Coddy call `spawn_agent` with `agent: "explore"` and
+`model` from the entry; do not substitute a Coddy CLI command for that subagent.
 
 ## 5. Decide
 
