@@ -129,19 +129,18 @@ worth fixing, the ones it rejected with the evidence, and whether the quorum was
 | Cursor Agent | `agent -p --trust --mode ask --model M < brief` | a real review, 2026.10.01 |
 | Devin | `devin -p --model M --prompt-file brief --permission-mode auto` | a real review, 3000.11.3 |
 | OpenCode | `opencode run -m M --agent plan < brief` | a real review, 1.18.16 |
-| Antigravity | `python3 scripts/agy-stream.py agy M < brief` | a real review, 1.3.0 |
+| Antigravity | `agy --model M --mode plan -p "$(cat brief)"` | a real review, 1.3.0 |
 | Qwen Code | `qwen -m M --approval-mode plan -o text < brief` | flags from `--help` |
 | Gemini CLI | `gemini -m M --approval-mode plan -o text < brief` | flags from `--help` of its fork |
 | Kimi | `kimi --quiet --plan -m M < brief` | flags from `--help` |
 | Koda | `koda "<brief>"` | kept from Coddy's original list |
 
 The brief never travels as a command-line argument (a 138 KB brief that way fails with
-`Argument list too long` before the model is even called; Koda, which takes nothing else, gets a
-brief only while it fits), stdin is closed for every reviewer, and
-each one runs in its CLI's read-only mode inside an empty directory. Antigravity reads a prompt from
-stdin only as a stream-json message, so its command goes through a small adapter,
-`scripts/agy-stream.py`, which needs Python; its print mode does not block file writes, so that
-reviewer rests on the tool ban and the empty directory alone. [references/agents.md](references/agents.md)
+`Argument list too long` before the model is even called; Koda and Antigravity, which take
+nothing else, get a brief only while it fits), stdin is closed for every reviewer, and
+each one runs in its CLI's read-only mode inside an empty directory. Antigravity's print mode
+does not block file writes, so that reviewer rests on the tool ban and the empty directory alone.
+[references/agents.md](references/agents.md)
 has the details of every CLI, its pitfalls and how to recover an answer from a reviewer that timed out.
 
 ## The helper
