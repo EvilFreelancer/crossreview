@@ -210,10 +210,27 @@ Three setup steps the desktop app hides from a standalone CLI:
    in `resources/config/provider/`. One copy fixes it.
 2. Sign in once with `zcode login`: the desktop's login is not shared, and a signed-out CLI has an
    empty model registry.
-3. Pick the model. Headless runs take `config.defaultModelSelection` from `~/.zcode/v2/provider_config.json`
-   (`{"providerId": "account:zai-individual-coding-plan", "modelId": "GLM-5.3"}` for a Z.AI
-   individual coding plan; the ids of the account's models are in `~/.zcode/cli/db/db.sqlite`).
-   There is no `--model` flag, so the roster's model is a label only, like Koda's.
+3. Pick the model. Headless runs take `config.defaultModelSelection` from `~/.zcode/v2/provider_config.json`,
+   and since the account route may fail (see below), the reliable setup is a personal provider
+   under `config.providerConfigRules.providerRules` with an API key from the Z.AI console
+   (personal rules use `personalModelIds`, not `builtinModelIds`):
+
+   ```json
+   {
+     "providerId": "zai-api-key",
+     "providerName": "Z.AI API Key",
+     "config": {
+       "group": "standard-personal",
+       "access": {"type": "zhipu-coding-plan-api-key", "apiKey": "<your key>"},
+       "api": {"type": "anthropic-messages", "baseUrl": "https://api.z.ai/api/anthropic"},
+       "personalModelIds": ["GLM-5.3", "GLM-5.3-Flash", "GLM-5.2"]
+     }
+   }
+   ```
+
+   with `"defaultModelSelection": {"providerId": "zai-api-key", "modelId": "GLM-5.3",
+   "options": {"reasoningLevel": "high"}}` next to it. There is no `--model` flag, so the roster's
+   model is a label only, like Koda's.
 
 - The brief travels as an argument (Koda's exception, `ARG_LIMIT`): `--prompt` takes text only,
   `--attach` accepts images and video, not text files.
@@ -227,11 +244,13 @@ Three setup steps the desktop app hides from a standalone CLI:
   `POST https://api.z.ai/api/auth/z/login`, and that endpoint may answer
   `{"code":500,"msg":"Z.ai user information is invalid"}` (checked 2026-11-01 with a valid token,
   direct and through a proxy). The desktop app does not use this exchange — it injects its own
-  tokens into the agent — so ZCode can chat in its GUI and still fail as a reviewer. The answer is
-  on the Z.ai account side (subscription/API access), not in the CLI's flags.
+  tokens into the agent — so ZCode can chat in its GUI and still fail as a reviewer. A personal
+  API-key provider (step 3) bypasses the exchange; API-key calls bill from the account's balance
+  (`[1113][Insufficient balance or no resource package. Please recharge.]` means recharge, not a
+  CLI problem).
 - Checked on 0.17.0 (the CLI bundle inside the ZCode 3.16.3 desktop app): detection, the launcher's
-  quoting, `zcode login`, model selection and a one-word probe all run; the probe fails at the
-  coding-plan key exchange above, so no review has completed through the template yet.
+  quoting, `zcode login`, model selection and a one-word probe all run; the probe reaches the model
+  API and stops at the account problems above, so no review has completed through the template yet.
 - Recover: in the `work` directory, `zcode -c --prompt "Do not call tools. Write your final review now."`
   resumes the latest session of that directory, `zcode --resume <sess_...>` an earlier one.
 
