@@ -248,9 +248,8 @@ Three setup steps the desktop app hides from a standalone CLI:
   API-key provider (step 3) bypasses the exchange; API-key calls bill from the account's balance
   (`[1113][Insufficient balance or no resource package. Please recharge.]` means recharge, not a
   CLI problem).
-- Checked on 0.17.0 (the CLI bundle inside the ZCode 3.16.3 desktop app): detection, the launcher's
-  quoting, `zcode login`, model selection and a one-word probe all run; the probe reaches the model
-  API and stops at the account problems above, so no review has completed through the template yet.
+- Verified on 0.17.0 (the CLI bundle inside the ZCode 3.16.3 desktop app): `GLM-5.3` answered a
+  one-word probe in 9 s and reviewed a 19 KB brief in 4m29s through the template.
 - Recover: in the `work` directory, `zcode -c --prompt "Do not call tools. Write your final review now."`
   resumes the latest session of that directory, `zcode --resume <sess_...>` an earlier one.
 

@@ -1284,6 +1284,8 @@ def prepare_run(entries: List[dict], brief_src: Path, run_dir: Path, cwd: Option
 HINTS = (
     (re.compile(r"insufficient balance|no resource package|please recharge", re.I),
      "the API key has no balance or resource package: recharge it at the provider"),
+    (re.compile(r"project_token_login_failed|user information is invalid", re.I),
+     "the ZCode OAuth token exchange failed: use a personal API-key provider (references/agents.md, zcode step 3)"),
     (re.compile(r"usage.?limit|rate.?limit|quota|too many requests|\b429\b", re.I), "usage or rate limit"),
     (re.compile(r"\b401\b|unauthori[sz]ed|invalid.{0,20}(api.?key|token|credential)|not (logged|signed) in|"
                 r"log ?in (first|required)|no auth type|authenticat", re.I), "not signed in or invalid credentials"),

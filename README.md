@@ -136,12 +136,12 @@ worth fixing, the ones it rejected with the evidence, and whether the quorum was
 | Qwen Code | `qwen -m M --approval-mode plan -o text < brief` | flags from `--help` |
 | Gemini CLI | `gemini -m M --approval-mode plan -o text < brief` | flags from `--help` of its fork |
 | Kimi | `kimi --quiet --plan -m M < brief` | flags from `--help` |
-| ZCode | `zcode --prompt "<brief>" --mode plan --no-color` | flags from `--help`, 0.17.0 |
+| ZCode | `zcode --prompt "<brief>" --mode plan --no-color` | a real review, 0.17.0 |
 | Koda | `koda "<brief>"` | kept from Coddy's original list |
 
 The brief never travels as a command-line argument (a 138 KB brief that way fails with
-`Argument list too long` before the model is even called; Koda, which takes nothing else, gets a
-brief only while it fits), stdin is closed for every reviewer, and
+`Argument list too long` before the model is even called; Koda and ZCode, which take nothing else,
+get a brief only while it fits), stdin is closed for every reviewer, and
 each one runs in its CLI's read-only mode inside an empty directory. [references/agents.md](references/agents.md)
 has the details of every CLI, its pitfalls and how to recover an answer from a reviewer that timed out.
 
