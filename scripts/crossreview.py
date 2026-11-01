@@ -303,6 +303,21 @@ def parse_opencode_models(text: str) -> List[str]:
     return [ln.strip() for ln in text.splitlines() if re.match(r"^\S+/\S+$", ln.strip())]
 
 
+_ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def parse_antigravity_models(text: str) -> List[str]:
+    """`agy models`: one `id<TAB>display name` per line, after a progress line."""
+    out = []
+    # A colour code sits inside a line; anything else (erase, cursor) ends what a spinner wrote.
+    text = _ANSI.sub(lambda m: "" if m.group(0).endswith("m") else "\n", text)
+    for line in re.split(r"[\r\n]+", text):
+        match = re.match(r"^([A-Za-z0-9][\w.\-:/@+]*)\t\S", line)
+        if match:
+            out.append(match.group(1))
+    return out
+
+
 def coddy_config_path() -> Path:
     if os.environ.get("CODDY_CONFIG"):
         return Path(os.environ["CODDY_CONFIG"]).expanduser()
@@ -352,7 +367,8 @@ def list_models(agent: str, binary: Optional[str] = None) -> Tuple[List[str], st
         return [], "failed: `%s %s` (%s): %s" % (cand, spec.models, "timeout" if rc is None else "rc=%s" % rc,
                                                 text.strip()[-300:])
     parser = {"codex": parse_codex_models, "cursor": parse_cursor_models,
-              "devin": parse_devin_models, "opencode": parse_opencode_models}.get(agent)
+              "devin": parse_devin_models, "opencode": parse_opencode_models,
+              "antigravity": parse_antigravity_models}.get(agent)
     if parser is None:
         return [ln.strip() for ln in text.splitlines() if ln.strip()], "raw output of %s %s" % (cand, spec.models)
     try:
@@ -386,10 +402,13 @@ HOSTS = {
     "gemini": (None, "~/.gemini", ".gemini"),
     "qwen": (None, "~/.qwen", ".qwen"),
     "kimi": (None, "~/.kimi", ".kimi"),
+    # Antigravity keeps its settings.json there, and a project's customizations in .agents.
+    "antigravity": (None, "~/.gemini/antigravity-cli", ".agents"),
 }
 OTHER_HOST = (None, "~/.agents", ".agents")
 HOST_ALIASES = {"claude-code": "claude", "claudecode": "claude", "cursor-agent": "cursor", "agent": "cursor",
-                "codex-cli": "codex", "qwen-code": "qwen", "gemini-cli": "gemini", "kimi-cli": "kimi"}
+                "codex-cli": "codex", "qwen-code": "qwen", "gemini-cli": "gemini", "kimi-cli": "kimi",
+                "agy": "antigravity", "antigravity-cli": "antigravity"}
 ROSTER_FILE = "crossreview.json"
 TRUST_FILE = "crossreview-trust.json"
 SCOPES = ("local", "global")
@@ -622,6 +641,12 @@ def normalize_entries(roster: dict, origin: str = "user") -> List[dict]:
     return out
 
 
+def takes_brief_as_argument(spec: AgentSpec) -> bool:
+    """This CLI's template passes the brief as a command-line argument (koda, antigravity,
+    zcode), so a brief over the OS argument limit cannot reach it."""
+    return '"$(cat {brief})"' in spec.posix or '"$(Get-Content' in spec.powershell
+
+
 KNOWN_ISSUES = (
     (re.compile(r"\"\$\((cat|Get-Content)\b"),
      "passes the brief as an argument: a brief over 128 KB fails with 'Argument list too long' "
@@ -646,10 +671,10 @@ def entry_warnings(entry: dict, table: Dict[str, AgentSpec]) -> List[str]:
     spec = table.get(entry.get("agent", ""))
     known = []
     for pattern, text in KNOWN_ISSUES:
-        if pattern.search(command) and not (spec and spec.agent in ARG_AGENTS and "argument" in text):
+        if pattern.search(command) and not (spec and takes_brief_as_argument(spec) and "argument" in text):
             known.append(text)
     warnings.extend(known)
-    if spec and spec.agent in ARG_AGENTS:
+    if spec and takes_brief_as_argument(spec):
         warnings.append("%s takes the brief only as a command-line argument: a brief over %s cannot reach it"
                         % (spec.agent, human_bytes(ARG_LIMIT)))
     if spec and entry.get("model") and entry.get("binary"):
@@ -772,7 +797,7 @@ def build_entries(specs: List[str], table: Dict[str, AgentSpec], windows: bool =
             raise CrossreviewError("%s needs a model: %s:<model id>" % (agent, agent))
         entry = {"kind": "cli", "agent": agent, "binary": det.binary,
                  "command": fill(det.template, model=model or "")}
-        if agent not in ARG_AGENTS and plan_command(entry["command"])["mode"] != "exec":
+        if not takes_brief_as_argument(table[agent]) and plan_command(entry["command"])["mode"] != "exec":
             raise CrossreviewError("the command built for %s is not a plain command line: %s" % (agent, entry["command"]))
         if model:
             entry["model"] = model
@@ -1051,9 +1076,6 @@ def human_secs(s: Optional[float]) -> str:
 # One command-line argument: Linux caps it at 128 KB (MAX_ARG_STRLEN), Windows
 # the whole command line at 32 767 characters.
 ARG_LIMIT = 30_000 if IS_WINDOWS else 120_000
-# CLIs that take the brief only as a command-line argument: their templates hold
-# "$(cat {brief})" and the runner substitutes the brief into argv itself.
-ARG_AGENTS = frozenset(("koda", "zcode"))
 ARG_BRIEF = {'$(cat {brief})', '$(Get-Content -Raw {brief})', '$(Get-Content -Raw -Encoding UTF8 {brief})'}
 PS_PREFIX = ["Get-Content", "-Raw"]
 SHELL_ONLY = {";", "&", "&&", "||", "(", ")", "`"}

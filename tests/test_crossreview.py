@@ -86,6 +86,21 @@ def write_stub(bin_dir: Path, name: str, version: str = "", help_text: str = "",
     path.chmod(0o755)
 
 
+def write_arg_echo(bin_dir: Path, name: str) -> None:
+    """An executable that prints its last argument: the koda/antigravity side of the exchange."""
+    bin_dir.mkdir(exist_ok=True)
+    if IS_WINDOWS:
+        echo = bin_dir / "echo_arg.py"
+        echo.write_text("import sys\nsys.stdout.buffer.write(sys.argv[-1].encode('utf-8'))\n",
+                        encoding="utf-8")
+        (bin_dir / (name + ".cmd")).write_text('@"%s" "%s" %%*\r\n' % (sys.executable, echo),
+                                               encoding="ascii")
+    else:
+        path = bin_dir / name
+        path.write_text('#!/bin/sh\nfor last; do :; done\nprintf "%s" "$last"\n', encoding="ascii")
+        path.chmod(0o755)
+
+
 def tools_path(tmp: Path) -> str:
     """A directory with the few system tools the detection scripts use, and nothing else."""
     tools = tmp / "tools"
@@ -141,19 +156,24 @@ class TableTest(unittest.TestCase):
             for template in (spec.posix, spec.powershell):
                 for placeholder in ("{bin}", "{brief}", "{out}"):
                     self.assertIn(placeholder, template, "%s: %s" % (spec.agent, template))
-                if spec.agent not in cr.ARG_AGENTS:
+                if not cr.takes_brief_as_argument(spec):
                     self.assertIn("{model}", template, spec.agent)
                     self.assertNotIn("$(", template, "%s passes the brief as an argument" % spec.agent)
             self.assertTrue(spec.marker and spec.marker == spec.marker.lower(), spec.agent)
 
+    def test_only_the_argument_rows_pass_the_brief_as_an_argument(self):
+        table = cr.load_table()
+        by_agent = {a: cr.takes_brief_as_argument(s) for a, s in table.items()}
+        self.assertEqual([a for a, yes in by_agent.items() if yes], ["antigravity", "zcode", "koda"])
+
     def test_brief_argument_agents_read_the_brief_from_a_command_substitution(self):
         table = cr.load_table()
-        self.assertTrue(cr.ARG_AGENTS <= set(table), "every argument-brief agent needs a row")
-        for agent in cr.ARG_AGENTS:
+        arg_agents = [a for a, s in table.items() if cr.takes_brief_as_argument(s)]
+        self.assertTrue(arg_agents, "argument-brief agents need rows")
+        for agent in arg_agents:
             spec = table[agent]
             self.assertIn("$(cat {brief})", spec.posix, agent)
             self.assertIn("$(Get-Content -Raw -Encoding UTF8 {brief})", spec.powershell, agent)
-            self.assertIsNone(spec.models, "%s lists no models" % agent)
 
     def test_zcode_template_keeps_the_read_only_mode(self):
         spec = cr.load_table()["zcode"]
@@ -224,6 +244,14 @@ class ModelsParsingTest(unittest.TestCase):
                 "  swe-2-medium                       SWE-2 Medium  [262K context, Free]\n")
         self.assertEqual(cr.parse_devin_models(text), ["swe-2-high", "swe-2-medium"])
 
+    def test_antigravity_list(self):
+        text = ("Fetching available models...\n\x1b[Kgemini-3.8-flash-high\tGemini 3.8 Flash (High)\r\n"
+                "claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\ngpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n")
+        self.assertEqual(cr.parse_antigravity_models(text),
+                         ["gemini-3.8-flash-high", "claude-sonnet-4-6", "gpt-oss-120b-medium"])
+        self.assertEqual(cr.parse_antigravity_models("\x1b[1mgemini-3.1-pro-low\x1b[0m\tGemini 3.1 Pro (Low)\n"),
+                         ["gemini-3.1-pro-low"])
+
     def test_opencode_list(self):
         self.assertEqual(cr.parse_opencode_models("opencode/big-pickle\nrpa/gpt-oss:120b\n\nnoise line\n"),
                          ["opencode/big-pickle", "rpa/gpt-oss:120b"])
@@ -265,12 +293,15 @@ class DetectTest(TempCase):
         write_stub(bin_dir, "devin", rc=1)                                  # on PATH, but not the agent
         write_stub(bin_dir, "agent", version="1.0", help_text="some other tool")  # unrelated `agent`
         write_stub(bin_dir, "cursor-agent", version="2026.10.01", help_text="Start the Cursor Agent")
+        write_stub(bin_dir, "agy", version="1.3.0", help_text="Usage of agy:", models="models", models_out="m1")
         return os.pathsep.join([str(bin_dir), tools_path(self.tmp)])
 
     def test_python_detection(self):
         os.environ["PATH"] = self.stub_path()
         found = {d.agent: d for d in cr.detect(cr.load_table())}
-        self.assertEqual(sorted(found), ["claude", "codex", "cursor"])
+        self.assertEqual(sorted(found), ["antigravity", "claude", "codex", "cursor"])
+        self.assertEqual(found["antigravity"].models_cmd, "agy models")
+        self.assertIn('$(Get-Content' if IS_WINDOWS else '$(cat {brief})', found["antigravity"].template)
         self.assertEqual(found["claude"].models_cmd, "")
         self.assertEqual(found["codex"].models_cmd, "codex debug models")
         self.assertEqual(found["cursor"].binary, "cursor-agent")
@@ -290,7 +321,7 @@ class DetectTest(TempCase):
         rc, out, err = self.helper("detect", env=env)
         self.assertEqual(rc, 0, err)
         self.assertEqual(sh.stdout.decode(), out)
-        self.assertEqual(len(out.strip().splitlines()), 3)
+        self.assertEqual(len(out.strip().splitlines()), 4)
 
     @unittest.skipUnless(POWERSHELLS, "no PowerShell")
     def test_powershell_detection_matches_python(self):
@@ -304,11 +335,12 @@ class DetectTest(TempCase):
                                     stderr=subprocess.PIPE, timeout=180)
                 self.assertEqual(ps.returncode, 0, ps.stderr)
                 lines = sorted(ps.stdout.decode().strip().splitlines())
-                self.assertEqual([ln.split("\t")[0] for ln in lines], ["claude", "codex", "cursor"], lines)
+                self.assertEqual([ln.split("\t")[0] for ln in lines],
+                                 ["antigravity", "claude", "codex", "cursor"], lines)
                 for ln in lines:
                     agent, _, models_cmd, template = ln.split("\t")
-                    self.assertEqual(template, cr.fill(table[agent].powershell,
-                                                       bin="cursor-agent" if agent == "cursor" else agent))
+                    self.assertEqual(template, cr.fill(table[agent].template(True), bin={
+                        "cursor": "cursor-agent", "antigravity": "agy"}.get(agent, agent)))
                     if agent == "codex":
                         self.assertEqual(models_cmd, "codex debug models")
 
@@ -345,6 +377,38 @@ class PowerShellTemplateTest(TempCase):
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertEqual(out.read_bytes(), payload)
 
+    def test_the_antigravity_template_runs_from_a_plain_roster_command(self):
+        bin_dir = self.tmp / "bin dir"
+        bin_dir.mkdir()
+        # A real executable, not a .cmd shim: cmd.exe would re-parse the multi-line brief
+        # argument (the runner refuses batch shims for exactly that reason). PowerShell needs
+        # the call operator for a quoted path; the runner runs the command without a shell.
+        echo = bin_dir / "echo_arg.py"
+        echo.write_text("import sys\nsys.stdout.buffer.write(sys.argv[-1].encode('utf-8'))\n",
+                        encoding="utf-8")
+        binary = '& "%s" "%s"' % (Path(sys.executable).as_posix(), echo.as_posix())
+        work = self.tmp / "run dir"
+        work.mkdir()
+        brief = work / "brief.md"
+        payload = "Brief: значение, 値, café\nline two\n".encode("utf-8")
+        brief.write_bytes(payload)
+        env = dict(os.environ, PATH=os.pathsep.join([str(bin_dir), os.environ["PATH"]]))
+        for exe in POWERSHELLS:
+            with self.subTest(powershell=exe):
+                out = work / ("review-%s.md" % Path(exe).stem)
+                command = cr.fill(cr.load_table()["antigravity"].template(True), bin=binary, model="echo",
+                                  brief='"%s"' % brief, out='"%s"' % out)
+                proc = subprocess.run([exe, "-NoProfile", "-Command", self.PROLOGUE + command + self.EPILOGUE],
+                                      env=env, cwd=str(work), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      timeout=120)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                data = out.read_bytes()
+                # Windows PowerShell 5.1 writes a `>` redirect as UTF-16 with a BOM (agents.tsv
+                # says so) and hands multi-line native arguments over with CRLF endings; pwsh
+                # keeps both as they are. The content is what must round-trip unchanged.
+                got = data[2:].decode("utf-16-le") if data.startswith(b"\xff\xfe") else data.decode("utf-8")
+                self.assertEqual(got.replace("\r\n", "\n"), payload.decode("utf-8"))
+
 
 class RosterTest(TempCase):
     def make_repo(self) -> Path:
@@ -379,12 +443,15 @@ class RosterTest(TempCase):
         os.environ["CODDY_HOME"] = str(self.tmp / "coddy-home")
         expected = {"claude": self.home / ".claude", "cursor": self.home / ".cursor", "codex": self.home / ".codex",
                     "coddy": self.tmp / "coddy-home", "kimi": self.home / ".kimi",
-                    "opencode": self.home / ".config" / "opencode", "windsurf": self.home / ".agents"}
+                    "opencode": self.home / ".config" / "opencode", "windsurf": self.home / ".agents",
+                    "antigravity": self.home / ".gemini" / "antigravity-cli"}
         for host, folder in expected.items():
             self.assertEqual(cr.global_roster_path(host), folder / "crossreview.json", host)
         self.assertEqual(cr.local_roster_path("claude", repo), repo / ".claude" / "crossreview.json")
         self.assertEqual(cr.local_roster_path("coddy", repo), repo / ".coddy" / "crossreview.json")
         self.assertEqual(cr.local_roster_path("windsurf", repo), repo / ".agents" / "crossreview.json")
+        self.assertEqual(cr.local_roster_path("antigravity", repo), repo / ".agents" / "crossreview.json")
+        self.assertEqual(cr.resolve_host("agy"), "antigravity")
         os.environ["CODEX_HOME"] = str(self.tmp / "cx")
         self.assertEqual(cr.global_roster_path("codex"), self.tmp / "cx" / "crossreview.json")
         os.environ["CROSSREVIEW_HOME"] = str(self.tmp / "shared")
@@ -926,6 +993,37 @@ class RunTest(TempCase):
         self.assertEqual((run_dir / "reviews" / "shim.md").read_bytes(), self.brief.read_bytes())
         self.assertEqual(by_name["shim-arg"]["status"], "failed")
         self.assertIn("batch file", by_name["shim-arg"]["note"])
+
+    def agy_command(self, model: str = "gemini-3.8-flash-low") -> str:
+        """The table's own antigravity template. The echo runs from python.exe, a real executable:
+        the runner refuses to pass the brief through a .cmd/.bat shim (cmd.exe would re-parse it)."""
+        echo = self.tmp / "echo_arg.py"
+        if not echo.exists():
+            echo.write_text("import sys\nsys.stdout.buffer.write(sys.argv[-1].encode('utf-8'))\n",
+                            encoding="utf-8")
+        return cr.fill(cr.load_table()["antigravity"].template(),
+                       bin='"%s" "%s"' % (Path(sys.executable).as_posix(), echo.as_posix()), model=model)
+
+    def test_antigravity_gets_the_brief_as_an_argument_and_leaves_a_review(self):
+        payload = "Review this: значение, 値, café\r\nsecond line\n".encode("utf-8")
+        self.brief.write_bytes(payload)
+        roster = self.roster([{"name": "agy", "agent": "antigravity", "binary": "agy",
+                               "model": "gemini-3.8-flash-low", "command": self.agy_command()}])
+        rc, out, status, run_dir = self.run_and_wait(roster)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(status["reviewers"][0]["status"], "done", out)
+        # The helper reads the brief as text, so CRLF arrives in the argument as LF.
+        self.assertEqual((run_dir / "reviews" / "agy.md").read_bytes(), payload.replace(b"\r\n", b"\n"))
+        # The argument-only prompt is a known limitation of this CLI, warned about in the roster listing.
+        rc, listed, _ = self.helper("roster", "--roster", roster)
+        self.assertIn("command-line argument", listed)
+
+    def test_antigravity_refuses_a_brief_too_long_for_an_argument(self):
+        self.brief.write_text("x" * (cr.ARG_LIMIT + 10), encoding="utf-8")
+        roster = self.roster([{"name": "agy", "command": self.agy_command()}])
+        rc, out, status, _ = self.run_and_wait(roster)
+        self.assertEqual(status["reviewers"][0]["status"], "failed", out)
+        self.assertIn("command-line argument", status["reviewers"][0]["note"])
 
     def test_one_off_reviewers_and_unknown_names(self):
         roster = self.roster([{"name": "good", "command": self.command("ok")}])
