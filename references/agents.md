@@ -7,7 +7,8 @@ explains them. `{bin}` is the detected binary, `{model}` is written into the ros
 
 Rules every template follows, and why:
 
-- **The brief never travels as an argument** (Koda is the one exception, see below). Linux caps one
+- **The brief never travels as an argument** (Koda, Antigravity and ZCode are the exceptions, see
+  below). Linux caps one
   argument at 128 KB (`MAX_ARG_STRLEN`),
   Windows a whole command line at 32 767 characters. A 138 KB brief passed as `"$(cat brief)"`
   fails with `Argument list too long` before the model is called (Cursor Agent and Coddy, both
@@ -154,6 +155,112 @@ kimi --quiet --plan -m {model} < {brief} > {out}
 - Stdin is read as the prompt in print mode (checked).
 - Unverified (1.30.0 installed, the key on this machine is rejected with 401).
 
+## zcode (ZCode)
+
+```
+zcode --prompt "$(cat {brief})" --mode plan --no-color > {out}
+```
+
+ZCode ships as a desktop app, but the app carries its whole agent CLI: `resources/glm/zcode.cjs`
+(checked in `%LOCALAPPDATA%\Programs\ZCode`, version 0.17.0), which runs under Electron's own Node
+when `ELECTRON_RUN_AS_NODE=1` is set. The template wants a `zcode` launcher on PATH; it only has to
+forward its arguments to that bundle:
+
+- POSIX: a shell script that sets `ELECTRON_RUN_AS_NODE=1` and `exec`s `ZCode <bundle> "$@"`.
+  On Windows the bundle is `resources\glm\zcode.cjs` next to `ZCode.exe` (checked); on macOS the
+  app is an `.app` bundle — the executable is `ZCode.app/Contents/MacOS/ZCode` and the bundle is
+  presumably `ZCode.app/Contents/Resources/glm/zcode.cjs` (unverified, adapt the path).
+- Windows: it must be a real `.exe`, never a `.cmd`/`.bat` — the brief travels as one argument and
+  `cmd.exe` would re-parse its text (the runner refuses batch shims for exactly that reason). The
+  compiler that ships with Windows builds this launcher:
+
+  ```csharp
+  using System; using System.Diagnostics; using System.IO; using System.Text;
+  class ZCodeShim {
+    static int Main(string[] args) {
+      var root = Environment.GetEnvironmentVariable("ZCODE_DESKTOP_DIR") ?? Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "ZCode");
+      var psi = new ProcessStartInfo(Path.Combine(root, "ZCode.exe"));
+      psi.UseShellExecute = false;
+      psi.EnvironmentVariables["ELECTRON_RUN_AS_NODE"] = "1";
+      var sb = new StringBuilder(Quote(Path.Combine(root, "resources", "glm", "zcode.cjs")));
+      foreach (var a in args) sb.Append(' ').Append(Quote(a));
+      psi.Arguments = sb.ToString();
+      var p = Process.Start(psi); p.WaitForExit(); return p.ExitCode;
+    }
+    static string Quote(string s) {  // the inverse of MSVCRT argv parsing
+      bool need = s.Length == 0;
+      foreach (char c in s) if (char.IsWhiteSpace(c) || c == '"') { need = true; break; }
+      if (!need) return s;
+      var sb = new StringBuilder("\""); int bs = 0;
+      foreach (char c in s) {
+        if (c == '\\') { bs++; continue; }
+        if (c == '"') { sb.Append('\\', bs * 2 + 1).Append('"'); bs = 0; continue; }
+        sb.Append('\\', bs).Append(c); bs = 0;
+      }
+      sb.Append('\\', bs * 2).Append('"'); return sb.ToString();
+    }
+  }
+  ```
+
+  `csc /nologo /out:zcode.exe zcode-shim.cs` (the compiler is
+  `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe`). The quoting was checked to deliver
+  multi-line briefs with `"`, `&`, `%`, `<`, `|` and trailing backslashes unchanged.
+
+Three setup steps the desktop app hides from a standalone CLI:
+
+1. `provider/zcode-builtin.json` next to `zcode.cjs` — the bundle looks there, the desktop keeps it
+   in `resources/config/provider/`. One copy fixes it.
+2. Sign in once with `zcode login`: the desktop's login is not shared, and a signed-out CLI has an
+   empty model registry.
+3. Pick the model. Headless runs take `config.defaultModelSelection` from `~/.zcode/v2/provider_config.json`,
+   and since the account route may fail (see below), the reliable setup is a personal provider
+   under `config.providerConfigRules.providerRules` with an API key from the Z.AI console
+   (personal rules use `personalModelIds`, not `builtinModelIds`):
+
+   ```json
+   {
+     "providerId": "zai-api-key",
+     "providerName": "Z.AI API Key",
+     "config": {
+       "group": "standard-personal",
+       "access": {"type": "zhipu-coding-plan-api-key", "apiKey": "<your key>"},
+       "api": {"type": "anthropic-messages", "baseUrl": "https://api.z.ai/api/anthropic"},
+       "personalModelIds": ["GLM-5.3", "GLM-5.3-Flash", "GLM-5.2"]
+     }
+   }
+   ```
+
+   with `"defaultModelSelection": {"providerId": "zai-api-key", "modelId": "GLM-5.3",
+   "options": {"reasoningLevel": "high"}}` next to it. There is no `--model` flag, so the roster's
+   model is a label only, like Koda's.
+
+   A ZCode desktop update can move the bundle or wipe the copied `zcode-builtin.json`: after an
+   update, re-check the bundle path and redo step 1 and the launcher.
+
+- The brief travels as an argument (the same exception as Koda and Antigravity, `ARG_LIMIT`):
+  `--prompt` takes text only,
+  `--attach` accepts images and video, not text files, and stdin is not a prompt — without `--prompt`
+  the CLI opens its TUI (checked).
+- Read-only: `--mode plan` restricts writes and command execution; it is not an OS-level sandbox, so
+  the brief's tool ban and the empty working directory are what keep it harmless. `--prompt` defaults
+  to `--mode yolo`, never omit `--mode plan`.
+- Models: no listing command. The builtin catalog covers GLM-5.3, GLM-5.3-Flash, GLM-5.2 and others;
+  `zcode --help` lists the account plans.
+- A run can fail with `project_token_login_failed` even when `zcode login` says `Login successful`:
+  before the first model call the CLI exchanges the OAuth token for a coding-plan API key at
+  `POST https://api.z.ai/api/auth/z/login`, and that endpoint may answer
+  `{"code":500,"msg":"Z.ai user information is invalid"}` (checked 2026-11-01 with a valid token,
+  direct and through a proxy). The desktop app does not use this exchange — it injects its own
+  tokens into the agent — so ZCode can chat in its GUI and still fail as a reviewer. A personal
+  API-key provider (step 3) bypasses the exchange; API-key calls bill from the account's balance
+  (`[1113][Insufficient balance or no resource package. Please recharge.]` means recharge, not a
+  CLI problem).
+- Verified on 0.17.0 (the CLI bundle inside the ZCode 3.16.3 desktop app): `GLM-5.3` answered a
+  one-word probe in 9 s and reviewed a 19 KB brief in 4m29s through the template.
+- Recover: in the `work` directory, `zcode -c --mode plan --no-color --prompt "Do not call tools. Write your final review now."`
+  resumes the latest session of that directory, `zcode --resume <sess_...> --mode plan --no-color` an
+  earlier one.
 ## antigravity (Antigravity CLI)
 
 ```
@@ -186,8 +293,8 @@ agy --model {model} --mode plan -p "$(cat {brief})" > {out}
 koda "$(cat {brief})" > {out}
 ```
 
-- Kept from Coddy's original list, and the one exception to the rule above: Koda takes the prompt
-  only as an argument. The helper refuses it up front, with the reason in the status, when the brief
+- Kept from Coddy's original list, and one of the exceptions to the rule above: Koda takes the
+  prompt only as an argument. The helper refuses it up front, with the reason in the status, when the brief
   is longer than one argument may be (120 KB here, 30 KB on Windows). There is no model placeholder:
   put the CLI's model flag into the stored command by hand.
 - No read-only mode is known, so rely on the brief's tool ban and the empty working directory.

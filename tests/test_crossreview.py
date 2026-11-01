@@ -164,7 +164,35 @@ class TableTest(unittest.TestCase):
     def test_only_the_argument_rows_pass_the_brief_as_an_argument(self):
         table = cr.load_table()
         by_agent = {a: cr.takes_brief_as_argument(s) for a, s in table.items()}
-        self.assertEqual([a for a, yes in by_agent.items() if yes], ["antigravity", "koda"])
+        self.assertEqual([a for a, yes in by_agent.items() if yes], ["antigravity", "zcode", "koda"])
+
+    def test_brief_argument_agents_read_the_brief_from_a_command_substitution(self):
+        table = cr.load_table()
+        arg_agents = [a for a, s in table.items() if cr.takes_brief_as_argument(s)]
+        self.assertTrue(arg_agents, "argument-brief agents need rows")
+        for agent in arg_agents:
+            spec = table[agent]
+            self.assertIn("$(cat {brief})", spec.posix, agent)
+            self.assertIn("$(Get-Content -Raw -Encoding UTF8 {brief})", spec.powershell, agent)
+
+    def test_zcode_template_keeps_the_read_only_mode(self):
+        spec = cr.load_table()["zcode"]
+        for template in (spec.posix, spec.powershell):
+            self.assertIn("--prompt", template, template)
+            self.assertIn("--mode plan", template, template)
+
+    def test_entry_warnings_flag_a_drift_from_the_zcode_template(self):
+        table = cr.load_table()
+        spec = table["zcode"]
+        command = cr.fill(spec.template(), bin="zcode", model="GLM-5.3")
+        entry = {"kind": "cli", "agent": "zcode", "binary": "zcode", "model": "GLM-5.3", "command": command}
+        warnings = cr.entry_warnings(entry, table)
+        self.assertTrue(any("command-line argument" in w for w in warnings), warnings)
+        self.assertFalse(any("differs from the current template" in w for w in warnings), warnings)
+        self.assertFalse(any("passes the brief as an argument" in w for w in warnings), warnings)
+        drifted = dict(entry, command=command.replace("--mode plan", "--mode yolo"))
+        warnings = cr.entry_warnings(drifted, table)
+        self.assertTrue(any("differs from the current template" in w for w in warnings), warnings)
 
     def test_cursor_prefers_the_agent_alias(self):
         self.assertEqual(cr.load_table()["cursor"].binaries[0], "agent")
@@ -273,7 +301,7 @@ class DetectTest(TempCase):
         found = {d.agent: d for d in cr.detect(cr.load_table())}
         self.assertEqual(sorted(found), ["antigravity", "claude", "codex", "cursor"])
         self.assertEqual(found["antigravity"].models_cmd, "agy models")
-        self.assertIn('$(cat {brief})', found["antigravity"].template)
+        self.assertIn('$(Get-Content' if IS_WINDOWS else '$(cat {brief})', found["antigravity"].template)
         self.assertEqual(found["claude"].models_cmd, "")
         self.assertEqual(found["codex"].models_cmd, "codex debug models")
         self.assertEqual(found["cursor"].binary, "cursor-agent")
@@ -352,7 +380,13 @@ class PowerShellTemplateTest(TempCase):
     def test_the_antigravity_template_runs_from_a_plain_roster_command(self):
         bin_dir = self.tmp / "bin dir"
         bin_dir.mkdir()
-        write_arg_echo(bin_dir, "agy")
+        # A real executable, not a .cmd shim: cmd.exe would re-parse the multi-line brief
+        # argument (the runner refuses batch shims for exactly that reason). PowerShell needs
+        # the call operator for a quoted path; the runner runs the command without a shell.
+        echo = bin_dir / "echo_arg.py"
+        echo.write_text("import sys\nsys.stdout.buffer.write(sys.argv[-1].encode('utf-8'))\n",
+                        encoding="utf-8")
+        binary = '& "%s" "%s"' % (Path(sys.executable).as_posix(), echo.as_posix())
         work = self.tmp / "run dir"
         work.mkdir()
         brief = work / "brief.md"
@@ -362,13 +396,18 @@ class PowerShellTemplateTest(TempCase):
         for exe in POWERSHELLS:
             with self.subTest(powershell=exe):
                 out = work / ("review-%s.md" % Path(exe).stem)
-                command = cr.fill(cr.load_table()["antigravity"].template(True), bin="agy", model="echo",
+                command = cr.fill(cr.load_table()["antigravity"].template(True), bin=binary, model="echo",
                                   brief='"%s"' % brief, out='"%s"' % out)
                 proc = subprocess.run([exe, "-NoProfile", "-Command", self.PROLOGUE + command + self.EPILOGUE],
                                       env=env, cwd=str(work), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                       timeout=120)
                 self.assertEqual(proc.returncode, 0, proc.stderr)
-                self.assertEqual(out.read_bytes(), payload)
+                data = out.read_bytes()
+                # Windows PowerShell 5.1 writes a `>` redirect as UTF-16 with a BOM (agents.tsv
+                # says so) and hands multi-line native arguments over with CRLF endings; pwsh
+                # keeps both as they are. The content is what must round-trip unchanged.
+                got = data[2:].decode("utf-16-le") if data.startswith(b"\xff\xfe") else data.decode("utf-8")
+                self.assertEqual(got.replace("\r\n", "\n"), payload.decode("utf-8"))
 
 
 class RosterTest(TempCase):
@@ -956,12 +995,14 @@ class RunTest(TempCase):
         self.assertIn("batch file", by_name["shim-arg"]["note"])
 
     def agy_command(self, model: str = "gemini-3.8-flash-low") -> str:
-        """The table's own antigravity template, with a stub `agy` first on PATH."""
-        bin_dir = self.tmp / "agy-bin"
-        if not bin_dir.exists():
-            write_arg_echo(bin_dir, "agy")
-            os.environ["PATH"] = os.pathsep.join([str(bin_dir), os.environ["PATH"]])
-        return cr.fill(cr.load_table()["antigravity"].template(), bin="agy", model=model)
+        """The table's own antigravity template. The echo runs from python.exe, a real executable:
+        the runner refuses to pass the brief through a .cmd/.bat shim (cmd.exe would re-parse it)."""
+        echo = self.tmp / "echo_arg.py"
+        if not echo.exists():
+            echo.write_text("import sys\nsys.stdout.buffer.write(sys.argv[-1].encode('utf-8'))\n",
+                            encoding="utf-8")
+        return cr.fill(cr.load_table()["antigravity"].template(),
+                       bin='"%s" "%s"' % (Path(sys.executable).as_posix(), echo.as_posix()), model=model)
 
     def test_antigravity_gets_the_brief_as_an_argument_and_leaves_a_review(self):
         payload = "Review this: значение, 値, café\r\nsecond line\n".encode("utf-8")

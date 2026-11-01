@@ -642,8 +642,8 @@ def normalize_entries(roster: dict, origin: str = "user") -> List[dict]:
 
 
 def takes_brief_as_argument(spec: AgentSpec) -> bool:
-    """This CLI's template passes the brief as a command-line argument (koda, antigravity),
-    so a brief over the OS argument limit cannot reach it."""
+    """This CLI's template passes the brief as a command-line argument (koda, antigravity,
+    zcode), so a brief over the OS argument limit cannot reach it."""
     return '"$(cat {brief})"' in spec.posix or '"$(Get-Content' in spec.powershell
 
 
@@ -669,15 +669,17 @@ def entry_warnings(entry: dict, table: Dict[str, AgentSpec]) -> List[str]:
     if "{model}" in command:
         warnings.append("command still holds {model}: write the model into it")
     spec = table.get(entry.get("agent", ""))
+    known = []
     for pattern, text in KNOWN_ISSUES:
         if pattern.search(command) and not (spec and takes_brief_as_argument(spec) and "argument" in text):
-            warnings.append(text)
+            known.append(text)
+    warnings.extend(known)
     if spec and takes_brief_as_argument(spec):
         warnings.append("%s takes the brief only as a command-line argument: a brief over %s cannot reach it"
                         % (spec.agent, human_bytes(ARG_LIMIT)))
     if spec and entry.get("model") and entry.get("binary"):
         current = fill(spec.template(), bin=entry["binary"], model=entry["model"])
-        if current != command and not any(t in w for w in warnings for t in ("argument", "-p -i", "re-encodes")):
+        if current != command and not any(t in w for w in known for t in ("argument", "-p -i", "re-encodes")):
             warnings.append("differs from the current template: %s" % current)
     if not spec:
         warnings.append("agent %r is not in agents.tsv; the command runs exactly as written" % entry.get("agent"))
@@ -1304,6 +1306,10 @@ def prepare_run(entries: List[dict], brief_src: Path, run_dir: Path, cwd: Option
 
 
 HINTS = (
+    (re.compile(r"insufficient balance|no resource package|please recharge", re.I),
+     "the API key has no balance or resource package: recharge it at the provider"),
+    (re.compile(r"project_token_login_failed", re.I),
+     "the ZCode OAuth token exchange failed: use a personal API-key provider (references/agents.md, zcode step 3)"),
     (re.compile(r"usage.?limit|rate.?limit|quota|too many requests|\b429\b", re.I), "usage or rate limit"),
     (re.compile(r"\b401\b|unauthori[sz]ed|invalid.{0,20}(api.?key|token|credential)|not (logged|signed) in|"
                 r"log ?in (first|required)|no auth type|authenticat", re.I), "not signed in or invalid credentials"),

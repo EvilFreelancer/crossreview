@@ -137,11 +137,12 @@ worth fixing, the ones it rejected with the evidence, and whether the quorum was
 | Qwen Code | `qwen -m M --approval-mode plan -o text < brief` | flags from `--help` |
 | Gemini CLI | `gemini -m M --approval-mode plan -o text < brief` | flags from `--help` of its fork |
 | Kimi | `kimi --quiet --plan -m M < brief` | flags from `--help` |
+| ZCode | `zcode --prompt "<brief>" --mode plan --no-color` | a real review, 0.17.0 |
 | Koda | `koda "<brief>"` | kept from Coddy's original list |
 
 The brief never travels as a command-line argument (a 138 KB brief that way fails with
-`Argument list too long` before the model is even called; Koda and Antigravity, which take
-nothing else, get a brief only while it fits), stdin is closed for every reviewer, and
+`Argument list too long` before the model is even called; Koda, Antigravity and ZCode, which accept
+the brief only as an argument, get it only while it fits), stdin is closed for every reviewer, and
 each one runs in its CLI's read-only mode inside an empty directory. Antigravity's print mode
 does not block file writes, so that reviewer rests on the tool ban and the empty directory alone.
 [references/agents.md](references/agents.md)

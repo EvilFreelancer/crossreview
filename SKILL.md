@@ -5,13 +5,14 @@ description: >
   for a cross-review, a quorum review or a second opinion from other agents or models: fan a code
   review (uncommitted work, a branch, a commit range, files, a plan or a document) out to several
   console code agents (Claude Code, Codex, Coddy, Cursor Agent, Devin, OpenCode, Antigravity, Gemini
-  CLI, Qwen Code, Kimi, Koda) that review it in parallel and blind to each other, then, as the
-  orchestrator, verify every finding against the code and decide alone what matters and what to fix. Works from
+  CLI, Qwen Code, Kimi, ZCode, Koda) that review it in parallel and blind to each other, then, as
+  the orchestrator, verify every finding against the code and decide alone what matters and what to
+  fix. Works from
   any agent with a shell on Linux, macOS and Windows; the first run detects the installed CLIs,
   asks which agents and which of their models to use, and keeps the reviewer roster either for
   the project (in the agent's folder of the repository) or for all projects (in the agent's home).
 metadata:
-  version: 2.1.0
+  version: 2.2.0
   author: Pavel Rykov <paul@drteam.rocks>
   homepage: https://github.com/EvilFreelancer/crossreview
 ---
