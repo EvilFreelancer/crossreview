@@ -222,8 +222,16 @@ Three setup steps the desktop app hides from a standalone CLI:
   to `--mode yolo`, never omit `--mode plan`.
 - Models: no listing command. The builtin catalog covers GLM-5.3, GLM-5.3-Flash, GLM-5.2 and others;
   `zcode --help` lists the account plans.
-- Checked on 0.17.0 (the CLI bundle inside the ZCode 3.16.3 desktop app): detection, `--help` and
-  the launcher's quoting; unverified until a signed-in probe runs.
+- A run can fail with `project_token_login_failed` even when `zcode login` says `Login successful`:
+  before the first model call the CLI exchanges the OAuth token for a coding-plan API key at
+  `POST https://api.z.ai/api/auth/z/login`, and that endpoint may answer
+  `{"code":500,"msg":"Z.ai user information is invalid"}` (checked 2026-11-01 with a valid token,
+  direct and through a proxy). The desktop app does not use this exchange — it injects its own
+  tokens into the agent — so ZCode can chat in its GUI and still fail as a reviewer. The answer is
+  on the Z.ai account side (subscription/API access), not in the CLI's flags.
+- Checked on 0.17.0 (the CLI bundle inside the ZCode 3.16.3 desktop app): detection, the launcher's
+  quoting, `zcode login`, model selection and a one-word probe all run; the probe fails at the
+  coding-plan key exchange above, so no review has completed through the template yet.
 - Recover: in the `work` directory, `zcode -c --prompt "Do not call tools. Write your final review now."`
   resumes the latest session of that directory, `zcode --resume <sess_...>` an earlier one.
 
