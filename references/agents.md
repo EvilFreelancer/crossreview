@@ -7,7 +7,8 @@ explains them. `{bin}` is the detected binary, `{model}` is written into the ros
 
 Rules every template follows, and why:
 
-- **The brief never travels as an argument** (Koda is the one exception, see below). Linux caps one
+- **The brief never travels as an argument** (Koda, Antigravity and ZCode are the exceptions, see
+  below). Linux caps one
   argument at 128 KB (`MAX_ARG_STRLEN`),
   Windows a whole command line at 32 767 characters. A 138 KB brief passed as `"$(cat brief)"`
   fails with `Argument list too long` before the model is called (Cursor Agent and Coddy, both
@@ -237,7 +238,8 @@ Three setup steps the desktop app hides from a standalone CLI:
    A ZCode desktop update can move the bundle or wipe the copied `zcode-builtin.json`: after an
    update, re-check the bundle path and redo step 1 and the launcher.
 
-- The brief travels as an argument (Koda's exception, `ARG_LIMIT`): `--prompt` takes text only,
+- The brief travels as an argument (the same exception as Koda and Antigravity, `ARG_LIMIT`):
+  `--prompt` takes text only,
   `--attach` accepts images and video, not text files, and stdin is not a prompt — without `--prompt`
   the CLI opens its TUI (checked).
 - Read-only: `--mode plan` restricts writes and command execution; it is not an OS-level sandbox, so
@@ -259,6 +261,31 @@ Three setup steps the desktop app hides from a standalone CLI:
 - Recover: in the `work` directory, `zcode -c --mode plan --no-color --prompt "Do not call tools. Write your final review now."`
   resumes the latest session of that directory, `zcode --resume <sess_...> --mode plan --no-color` an
   earlier one.
+## antigravity (Antigravity CLI)
+
+```
+agy --model {model} --mode plan -p "$(cat {brief})" > {out}
+```
+
+- In print mode `agy` takes the prompt only as the value of `-p`, an argument: `-p=` answers
+  `empty prompt` and a bare `-p` prints usage (checked on 1.3.0), plain text on stdin is not read.
+  So, like koda, the brief travels as `$(cat {brief})` and the helper refuses a brief too long
+  for one argument (about 120 KB on Linux/macOS, 30 KB on Windows). Its stream-json input would
+  lift that limit, but it takes NDJSON rather than text, so a plain `< {brief} > {out}` command
+  cannot reach it without an adapter; the argument is the simpler deal.
+- **Not read-only** in print mode: `--mode plan` did not stop a file write, inside or outside the
+  working directory, when the prompt asked for one (checked on 1.3.0). Shell commands are denied,
+  because print mode cannot ask for the permission. So this reviewer rests on the brief's tool ban
+  and the empty `work` directory. Do not add `--disable-slash-commands`: the CLI warns that
+  `--mode plan` has no effect with it.
+- Every run is a conversation in the user's Antigravity history. Nothing arrives from the CLI
+  while the model thinks, so a quiet reviewer is not a hung one.
+- Models: `agy models` prints `id<TAB>name`, reasoning levels included in the id
+  (`gemini-3.8-flash-high`, `gemini-3.1-pro-low`); progress lines carry CSI sequences the parser
+  strips.
+- Verified on 1.3.0 (Windows): `gemini-3.8-flash-low` reviewed a 5 KB brief in 32 s.
+- Recover a reviewer that timed out from its conversation:
+  `agy --conversation <id> --mode plan -p="Do not call tools. Write your final review now."`.
 
 ## koda
 
@@ -266,8 +293,8 @@ Three setup steps the desktop app hides from a standalone CLI:
 koda "$(cat {brief})" > {out}
 ```
 
-- Kept from Coddy's original list, and the one exception to the rule above: Koda takes the prompt
-  only as an argument. The helper refuses it up front, with the reason in the status, when the brief
+- Kept from Coddy's original list, and one of the exceptions to the rule above: Koda takes the
+  prompt only as an argument. The helper refuses it up front, with the reason in the status, when the brief
   is longer than one argument may be (120 KB here, 30 KB on Windows). There is no model placeholder:
   put the CLI's model flag into the stored command by hand.
 - No read-only mode is known, so rely on the brief's tool ban and the empty working directory.
