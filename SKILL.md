@@ -215,5 +215,4 @@ substitute the quoted paths of the brief and of its output file for `{brief}` an
 `CROSSREVIEW_DEPTH=1 ` in front of the command (`$env:CROSSREVIEW_DEPTH = '1'; ` in PowerShell) so
 the reviewer knows not to start a crossreview of its own, and start it with your own background
 shell tool in an empty directory, each under a time limit; wait for all of them, then continue at
-step 5. Antigravity is the one reviewer that cannot do without Python: its command runs
-`scripts/agy-stream.py`.
+step 5.

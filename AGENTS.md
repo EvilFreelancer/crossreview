@@ -25,7 +25,6 @@ crossreview/
 ├─ scripts/
 │  ├─ agents.tsv                # THE table of reviewer CLIs: binaries, marker, models command, templates
 │  ├─ crossreview.py            # the helper: detect, models, roster, init, trust, brief, run, wait, ...
-│  ├─ agy-stream.py             # adapter: Antigravity's stream-json behind a plain `< brief > review`
 │  ├─ detect-agents.sh          # detection without Python, POSIX sh
 │  └─ detect-agents.ps1         # detection without Python, Windows PowerShell 5.1 and PowerShell 7
 └─ tests/test_crossreview.py    # python -m unittest discover -s tests
@@ -39,9 +38,13 @@ crossreview/
    finding is checked against the code and decided (fix, not worth fixing, rejected, open). Do not
    turn it into a vote;
 3. **The brief never travels as an argument** (`MAX_ARG_STRLEN` is 128 KB on Linux, a Windows
-   command line 32 767 characters), and a reviewer's stdin is the brief or `/dev/null`;
+   command line 32 767 characters), and a reviewer's stdin is the brief or `/dev/null` -
+   except the CLIs that take nothing else (koda, antigravity): they get a `$(cat {brief})`
+   template and the helper refuses them a brief too long for one argument;
 4. **Reviewers stay read-only**: the CLI's own read-only mode in the template, the tool ban in the
-   brief, the empty working directory of the run by default;
+   brief, the empty working directory of the run by default. A CLI with no working read-only mode
+   (antigravity) rests on the tool ban and the empty directory alone, and says so in
+   `references/agents.md`;
 5. **`agents.tsv` is the single source of the templates.** The helper and both detection scripts
    read it; never hard-code a template in one of them;
 6. **The three platforms stay equal.** Anything that runs a reviewer must work on Linux, macOS and
@@ -56,8 +59,8 @@ crossreview/
    `--version` or `--help` prints, the arguments that list its models (or `-`), the POSIX template
    and the PowerShell template (`cmd /d /c --% <the same command>`, `< NUL` instead of
    `< /dev/null`). Every template is a plain command line with `{brief}` and `{out}`: Coddy's
-   coordinator and a user without Python run it as written. A CLI that cannot be driven that way
-   gets an adapter script next to the table and names it through `{scripts}` (see `antigravity`).
+   coordinator and a user without Python run it as written. A CLI that takes the prompt only as
+   an argument gets a `$(cat {brief})` template like koda's and antigravity's, not an adapter.
 2. If it can list models, add a parser in `crossreview.py` (`parse_<agent>_models`) and a test with
    a captured sample of its output.
 3. Document it in `references/agents.md`: the template, how it stays read-only, the model listing,

@@ -78,9 +78,7 @@ class AgentSpec:
         self.powershell = powershell
 
     def template(self, windows=IS_WINDOWS):
-        """The command template of this system; {scripts}, the directory of the
-        table, is known here and filled in, the rest by whoever detects and runs."""
-        return (self.powershell if windows else self.posix).replace("{scripts}", str(HERE))
+        return self.powershell if windows else self.posix
 
 
 def load_table(path=TABLE_PATH) -> Dict[str, AgentSpec]:
@@ -305,7 +303,7 @@ def parse_opencode_models(text: str) -> List[str]:
     return [ln.strip() for ln in text.splitlines() if re.match(r"^\S+/\S+$", ln.strip())]
 
 
-_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 def parse_antigravity_models(text: str) -> List[str]:
@@ -643,6 +641,12 @@ def normalize_entries(roster: dict, origin: str = "user") -> List[dict]:
     return out
 
 
+def takes_brief_as_argument(spec: AgentSpec) -> bool:
+    """This CLI's template passes the brief as a command-line argument (koda, antigravity),
+    so a brief over the OS argument limit cannot reach it."""
+    return '"$(cat {brief})"' in spec.posix or '"$(Get-Content' in spec.powershell
+
+
 KNOWN_ISSUES = (
     (re.compile(r"\"\$\((cat|Get-Content)\b"),
      "passes the brief as an argument: a brief over 128 KB fails with 'Argument list too long' "
@@ -666,11 +670,11 @@ def entry_warnings(entry: dict, table: Dict[str, AgentSpec]) -> List[str]:
         warnings.append("command still holds {model}: write the model into it")
     spec = table.get(entry.get("agent", ""))
     for pattern, text in KNOWN_ISSUES:
-        if pattern.search(command) and not (spec and spec.agent == "koda" and "argument" in text):
+        if pattern.search(command) and not (spec and takes_brief_as_argument(spec) and "argument" in text):
             warnings.append(text)
-    if spec and spec.agent == "koda":
-        warnings.append("koda takes the brief only as a command-line argument: a brief over %s cannot reach it"
-                        % human_bytes(ARG_LIMIT))
+    if spec and takes_brief_as_argument(spec):
+        warnings.append("%s takes the brief only as a command-line argument: a brief over %s cannot reach it"
+                        % (spec.agent, human_bytes(ARG_LIMIT)))
     if spec and entry.get("model") and entry.get("binary"):
         current = fill(spec.template(), bin=entry["binary"], model=entry["model"])
         if current != command and not any(t in w for w in warnings for t in ("argument", "-p -i", "re-encodes")):
@@ -791,7 +795,7 @@ def build_entries(specs: List[str], table: Dict[str, AgentSpec], windows: bool =
             raise CrossreviewError("%s needs a model: %s:<model id>" % (agent, agent))
         entry = {"kind": "cli", "agent": agent, "binary": det.binary,
                  "command": fill(det.template, model=model or "")}
-        if agent != "koda" and plan_command(entry["command"])["mode"] != "exec":
+        if not takes_brief_as_argument(table[agent]) and plan_command(entry["command"])["mode"] != "exec":
             raise CrossreviewError("the command built for %s is not a plain command line: %s" % (agent, entry["command"]))
         if model:
             entry["model"] = model
