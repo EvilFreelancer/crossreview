@@ -154,6 +154,79 @@ kimi --quiet --plan -m {model} < {brief} > {out}
 - Stdin is read as the prompt in print mode (checked).
 - Unverified (1.30.0 installed, the key on this machine is rejected with 401).
 
+## zcode (ZCode)
+
+```
+zcode --prompt "$(cat {brief})" --mode plan --no-color > {out}
+```
+
+ZCode ships as a desktop app, but the app carries its whole agent CLI: `resources/glm/zcode.cjs`
+(checked in `%LOCALAPPDATA%\Programs\ZCode`, version 0.17.0), which runs under Electron's own Node
+when `ELECTRON_RUN_AS_NODE=1` is set. The template wants a `zcode` launcher on PATH; it only has to
+forward its arguments to that bundle:
+
+- POSIX: a shell script that sets `ELECTRON_RUN_AS_NODE=1` and `exec`s `ZCode <install
+  dir>/resources/glm/zcode.cjs "$@"` (the app executable and the bundle are next to each other).
+- Windows: it must be a real `.exe`, never a `.cmd`/`.bat` — the brief travels as one argument and
+  `cmd.exe` would re-parse its text (the runner refuses batch shims for exactly that reason). The
+  compiler that ships with Windows builds this launcher:
+
+  ```csharp
+  using System; using System.Diagnostics; using System.IO; using System.Text;
+  class ZCodeShim {
+    static int Main(string[] args) {
+      var root = Environment.GetEnvironmentVariable("ZCODE_DESKTOP_DIR") ?? Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "ZCode");
+      var psi = new ProcessStartInfo(Path.Combine(root, "ZCode.exe"));
+      psi.UseShellExecute = false;
+      psi.EnvironmentVariables["ELECTRON_RUN_AS_NODE"] = "1";
+      var sb = new StringBuilder(Quote(Path.Combine(root, "resources", "glm", "zcode.cjs")));
+      foreach (var a in args) sb.Append(' ').Append(Quote(a));
+      psi.Arguments = sb.ToString();
+      var p = Process.Start(psi); p.WaitForExit(); return p.ExitCode;
+    }
+    static string Quote(string s) {  // the inverse of MSVCRT argv parsing
+      bool need = s.Length == 0;
+      foreach (char c in s) if (char.IsWhiteSpace(c) || c == '"') { need = true; break; }
+      if (!need) return s;
+      var sb = new StringBuilder("\""); int bs = 0;
+      foreach (char c in s) {
+        if (c == '\\') { bs++; continue; }
+        if (c == '"') { sb.Append('\\', bs * 2 + 1).Append('"'); bs = 0; continue; }
+        sb.Append('\\', bs).Append(c); bs = 0;
+      }
+      sb.Append('\\', bs * 2).Append('"'); return sb.ToString();
+    }
+  }
+  ```
+
+  `csc /nologo /out:zcode.exe zcode-shim.cs` (the compiler is
+  `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe`). The quoting was checked to deliver
+  multi-line briefs with `"`, `&`, `%`, `<`, `|` and trailing backslashes unchanged.
+
+Three setup steps the desktop app hides from a standalone CLI:
+
+1. `provider/zcode-builtin.json` next to `zcode.cjs` — the bundle looks there, the desktop keeps it
+   in `resources/config/provider/`. One copy fixes it.
+2. Sign in once with `zcode login`: the desktop's login is not shared, and a signed-out CLI has an
+   empty model registry.
+3. Pick the model. Headless runs take `config.defaultModelSelection` from `~/.zcode/v2/provider_config.json`
+   (`{"providerId": "account:zai-individual-coding-plan", "modelId": "GLM-5.3"}` for a Z.AI
+   individual coding plan; the ids of the account's models are in `~/.zcode/cli/db/db.sqlite`).
+   There is no `--model` flag, so the roster's model is a label only, like Koda's.
+
+- The brief travels as an argument (Koda's exception, `ARG_LIMIT`): `--prompt` takes text only,
+  `--attach` accepts images and video, not text files.
+- Read-only: `--mode plan` restricts writes and command execution; it is not an OS-level sandbox, so
+  the brief's tool ban and the empty working directory are what keep it harmless. `--prompt` defaults
+  to `--mode yolo`, never omit `--mode plan`.
+- Models: no listing command. The builtin catalog covers GLM-5.3, GLM-5.3-Flash, GLM-5.2 and others;
+  `zcode --help` lists the account plans.
+- Checked on 0.17.0 (the CLI bundle inside the ZCode 3.16.3 desktop app): detection, `--help` and
+  the launcher's quoting; unverified until a signed-in probe runs.
+- Recover: in the `work` directory, `zcode -c --prompt "Do not call tools. Write your final review now."`
+  resumes the latest session of that directory, `zcode --resume <sess_...>` an earlier one.
+
 ## koda
 
 ```

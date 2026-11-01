@@ -645,11 +645,11 @@ def entry_warnings(entry: dict, table: Dict[str, AgentSpec]) -> List[str]:
         warnings.append("command still holds {model}: write the model into it")
     spec = table.get(entry.get("agent", ""))
     for pattern, text in KNOWN_ISSUES:
-        if pattern.search(command) and not (spec and spec.agent == "koda" and "argument" in text):
+        if pattern.search(command) and not (spec and spec.agent in ARG_AGENTS and "argument" in text):
             warnings.append(text)
-    if spec and spec.agent == "koda":
-        warnings.append("koda takes the brief only as a command-line argument: a brief over %s cannot reach it"
-                        % human_bytes(ARG_LIMIT))
+    if spec and spec.agent in ARG_AGENTS:
+        warnings.append("%s takes the brief only as a command-line argument: a brief over %s cannot reach it"
+                        % (spec.agent, human_bytes(ARG_LIMIT)))
     if spec and entry.get("model") and entry.get("binary"):
         current = fill(spec.template(), bin=entry["binary"], model=entry["model"])
         if current != command and not any(t in w for w in warnings for t in ("argument", "-p -i", "re-encodes")):
@@ -770,7 +770,7 @@ def build_entries(specs: List[str], table: Dict[str, AgentSpec], windows: bool =
             raise CrossreviewError("%s needs a model: %s:<model id>" % (agent, agent))
         entry = {"kind": "cli", "agent": agent, "binary": det.binary,
                  "command": fill(det.template, model=model or "")}
-        if agent != "koda" and plan_command(entry["command"])["mode"] != "exec":
+        if agent not in ARG_AGENTS and plan_command(entry["command"])["mode"] != "exec":
             raise CrossreviewError("the command built for %s is not a plain command line: %s" % (agent, entry["command"]))
         if model:
             entry["model"] = model
@@ -1049,6 +1049,9 @@ def human_secs(s: Optional[float]) -> str:
 # One command-line argument: Linux caps it at 128 KB (MAX_ARG_STRLEN), Windows
 # the whole command line at 32 767 characters.
 ARG_LIMIT = 30_000 if IS_WINDOWS else 120_000
+# CLIs that take the brief only as a command-line argument: their templates hold
+# "$(cat {brief})" and the runner substitutes the brief into argv itself.
+ARG_AGENTS = frozenset(("koda", "zcode"))
 ARG_BRIEF = {'$(cat {brief})', '$(Get-Content -Raw {brief})', '$(Get-Content -Raw -Encoding UTF8 {brief})'}
 PS_PREFIX = ["Get-Content", "-Raw"]
 SHELL_ONLY = {";", "&", "&&", "||", "(", ")", "`"}

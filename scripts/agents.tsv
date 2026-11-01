@@ -18,4 +18,5 @@ opencode	opencode	opencode	models	{bin} run -m {model} --agent plan < {brief} > 
 gemini	gemini	gemini	-	{bin} -m {model} --approval-mode plan -o text < {brief} > {out}	cmd /d /c --% {bin} -m {model} --approval-mode plan -o text < {brief} > {out}
 qwen	qwen	qwen	-	{bin} -m {model} --approval-mode plan -o text < {brief} > {out}	cmd /d /c --% {bin} -m {model} --approval-mode plan -o text < {brief} > {out}
 kimi	kimi	kimi	-	{bin} --quiet --plan -m {model} < {brief} > {out}	cmd /d /c --% {bin} --quiet --plan -m {model} < {brief} > {out}
+zcode	zcode	bigmodel	-	{bin} --prompt "$(cat {brief})" --mode plan --no-color > {out}	{bin} --prompt "$(Get-Content -Raw -Encoding UTF8 {brief})" --mode plan --no-color > {out}
 koda	koda	koda	-	{bin} "$(cat {brief})" > {out}	{bin} "$(Get-Content -Raw -Encoding UTF8 {brief})" > {out}

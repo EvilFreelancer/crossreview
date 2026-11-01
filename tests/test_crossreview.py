@@ -141,10 +141,19 @@ class TableTest(unittest.TestCase):
             for template in (spec.posix, spec.powershell):
                 for placeholder in ("{bin}", "{brief}", "{out}"):
                     self.assertIn(placeholder, template, "%s: %s" % (spec.agent, template))
-                if spec.agent != "koda":
+                if spec.agent not in cr.ARG_AGENTS:
                     self.assertIn("{model}", template, spec.agent)
                     self.assertNotIn("$(", template, "%s passes the brief as an argument" % spec.agent)
             self.assertTrue(spec.marker and spec.marker == spec.marker.lower(), spec.agent)
+
+    def test_brief_argument_agents_read_the_brief_from_a_command_substitution(self):
+        table = cr.load_table()
+        self.assertTrue(cr.ARG_AGENTS <= set(table), "every argument-brief agent needs a row")
+        for agent in cr.ARG_AGENTS:
+            spec = table[agent]
+            self.assertIn("$(cat {brief})", spec.posix, agent)
+            self.assertIn("$(Get-Content -Raw -Encoding UTF8 {brief})", spec.powershell, agent)
+            self.assertIsNone(spec.models, "%s lists no models" % agent)
 
     def test_cursor_prefers_the_agent_alias(self):
         self.assertEqual(cr.load_table()["cursor"].binaries[0], "agent")
