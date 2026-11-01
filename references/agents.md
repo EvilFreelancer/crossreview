@@ -154,6 +154,32 @@ kimi --quiet --plan -m {model} < {brief} > {out}
 - Stdin is read as the prompt in print mode (checked).
 - Unverified (1.30.0 installed, the key on this machine is rejected with 401).
 
+## antigravity (Antigravity CLI)
+
+```
+agy --model {model} --mode plan -p "$(cat {brief})" > {out}
+```
+
+- In print mode `agy` takes the prompt only as the value of `-p`, an argument: `-p=` answers
+  `empty prompt` and a bare `-p` prints usage (checked on 1.3.0), plain text on stdin is not read.
+  So, like koda, the brief travels as `$(cat {brief})` and the helper refuses a brief too long
+  for one argument (about 120 KB on Linux/macOS, 30 KB on Windows). Its stream-json input would
+  lift that limit, but it takes NDJSON rather than text, so a plain `< {brief} > {out}` command
+  cannot reach it without an adapter; the argument is the simpler deal.
+- **Not read-only** in print mode: `--mode plan` did not stop a file write, inside or outside the
+  working directory, when the prompt asked for one (checked on 1.3.0). Shell commands are denied,
+  because print mode cannot ask for the permission. So this reviewer rests on the brief's tool ban
+  and the empty `work` directory. Do not add `--disable-slash-commands`: the CLI warns that
+  `--mode plan` has no effect with it.
+- Every run is a conversation in the user's Antigravity history. Nothing arrives from the CLI
+  while the model thinks, so a quiet reviewer is not a hung one.
+- Models: `agy models` prints `id<TAB>name`, reasoning levels included in the id
+  (`gemini-3.8-flash-high`, `gemini-3.1-pro-low`); progress lines carry CSI sequences the parser
+  strips.
+- Verified on 1.3.0 (Windows): `gemini-3.8-flash-low` reviewed a 5 KB brief in 32 s.
+- Recover a reviewer that timed out from its conversation:
+  `agy --conversation <id> --mode plan -p="Do not call tools. Write your final review now."`.
+
 ## koda
 
 ```
