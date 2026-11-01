@@ -165,8 +165,10 @@ ZCode ships as a desktop app, but the app carries its whole agent CLI: `resource
 when `ELECTRON_RUN_AS_NODE=1` is set. The template wants a `zcode` launcher on PATH; it only has to
 forward its arguments to that bundle:
 
-- POSIX: a shell script that sets `ELECTRON_RUN_AS_NODE=1` and `exec`s `ZCode <install
-  dir>/resources/glm/zcode.cjs "$@"` (the app executable and the bundle are next to each other).
+- POSIX: a shell script that sets `ELECTRON_RUN_AS_NODE=1` and `exec`s `ZCode <bundle> "$@"`.
+  On Windows the bundle is `resources\glm\zcode.cjs` next to `ZCode.exe` (checked); on macOS the
+  app is an `.app` bundle — the executable is `ZCode.app/Contents/MacOS/ZCode` and the bundle is
+  presumably `ZCode.app/Contents/Resources/glm/zcode.cjs` (unverified, adapt the path).
 - Windows: it must be a real `.exe`, never a `.cmd`/`.bat` — the brief travels as one argument and
   `cmd.exe` would re-parse its text (the runner refuses batch shims for exactly that reason). The
   compiler that ships with Windows builds this launcher:
@@ -232,8 +234,12 @@ Three setup steps the desktop app hides from a standalone CLI:
    "options": {"reasoningLevel": "high"}}` next to it. There is no `--model` flag, so the roster's
    model is a label only, like Koda's.
 
+   A ZCode desktop update can move the bundle or wipe the copied `zcode-builtin.json`: after an
+   update, re-check the bundle path and redo step 1 and the launcher.
+
 - The brief travels as an argument (Koda's exception, `ARG_LIMIT`): `--prompt` takes text only,
-  `--attach` accepts images and video, not text files.
+  `--attach` accepts images and video, not text files, and stdin is not a prompt — without `--prompt`
+  the CLI opens its TUI (checked).
 - Read-only: `--mode plan` restricts writes and command execution; it is not an OS-level sandbox, so
   the brief's tool ban and the empty working directory are what keep it harmless. `--prompt` defaults
   to `--mode yolo`, never omit `--mode plan`.
@@ -250,8 +256,9 @@ Three setup steps the desktop app hides from a standalone CLI:
   CLI problem).
 - Verified on 0.17.0 (the CLI bundle inside the ZCode 3.16.3 desktop app): `GLM-5.3` answered a
   one-word probe in 9 s and reviewed a 19 KB brief in 4m29s through the template.
-- Recover: in the `work` directory, `zcode -c --prompt "Do not call tools. Write your final review now."`
-  resumes the latest session of that directory, `zcode --resume <sess_...>` an earlier one.
+- Recover: in the `work` directory, `zcode -c --mode plan --no-color --prompt "Do not call tools. Write your final review now."`
+  resumes the latest session of that directory, `zcode --resume <sess_...> --mode plan --no-color` an
+  earlier one.
 
 ## koda
 

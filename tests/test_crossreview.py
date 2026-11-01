@@ -155,6 +155,25 @@ class TableTest(unittest.TestCase):
             self.assertIn("$(Get-Content -Raw -Encoding UTF8 {brief})", spec.powershell, agent)
             self.assertIsNone(spec.models, "%s lists no models" % agent)
 
+    def test_zcode_template_keeps_the_read_only_mode(self):
+        spec = cr.load_table()["zcode"]
+        for template in (spec.posix, spec.powershell):
+            self.assertIn("--prompt", template, template)
+            self.assertIn("--mode plan", template, template)
+
+    def test_entry_warnings_flag_a_drift_from_the_zcode_template(self):
+        table = cr.load_table()
+        spec = table["zcode"]
+        command = cr.fill(spec.template(), bin="zcode", model="GLM-5.3")
+        entry = {"kind": "cli", "agent": "zcode", "binary": "zcode", "model": "GLM-5.3", "command": command}
+        warnings = cr.entry_warnings(entry, table)
+        self.assertTrue(any("command-line argument" in w for w in warnings), warnings)
+        self.assertFalse(any("differs from the current template" in w for w in warnings), warnings)
+        self.assertFalse(any("passes the brief as an argument" in w for w in warnings), warnings)
+        drifted = dict(entry, command=command.replace("--mode plan", "--mode yolo"))
+        warnings = cr.entry_warnings(drifted, table)
+        self.assertTrue(any("differs from the current template" in w for w in warnings), warnings)
+
     def test_cursor_prefers_the_agent_alias(self):
         self.assertEqual(cr.load_table()["cursor"].binaries[0], "agent")
 
